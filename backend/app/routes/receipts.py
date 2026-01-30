@@ -1,0 +1,268 @@
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy.orm import Session, joinedload
+from typing import List, Optional
+from app.core.database import get_db
+from app.models.receipt import Receipt as ReceiptModel, ReceiptItem as ReceiptItemModel, ReceiptType
+from app.models.asset import Asset as AssetModel
+from app.schemas.receipt import Receipt, ReceiptCreate, ReceiptDetail, ReceiptItem as ReceiptItemSchema
+from app.utils.security import get_current_username, get_current_user, require_admin
+from datetime import datetime, timedelta
+import pytz
+
+router = APIRouter(prefix="/receipts", tags=["receipts"])
+
+def generate_receipt_number(receipt_type: ReceiptType, db: Session) -> str:
+    """生成入库单号：RK-SERVER-20251216-000001 或 RK-PART-20251216-000001"""
+    today = datetime.now(pytz.timezone('Asia/Shanghai')).strftime('%Y%m%d')
+    prefix = f"RK-{receipt_type.value.upper()}-{today}-"
+    
+    # 查找今天该类型入库单的最大编号
+    max_receipt = db.query(ReceiptModel).filter(
+        ReceiptModel.receipt_number.like(f"{prefix}%")
+    ).order_by(ReceiptModel.receipt_number.desc()).first()
+    
+    if max_receipt:
+        # 提取编号部分
+        try:
+            last_num = int(max_receipt.receipt_number.split('-')[-1])
+            new_num = last_num + 1
+        except (ValueError, IndexError):
+            new_num = 1
+    else:
+        new_num = 1
+    
+    return f"{prefix}{str(new_num).zfill(6)}"
+
+@router.post("/", response_model=Receipt)
+def create_receipt(
+    receipt: ReceiptCreate, 
+    db: Session = Depends(get_db),
+    current_username: str = Depends(get_current_username)
+):
+    """创建入库单"""
+    receipt_number = generate_receipt_number(receipt.receipt_type, db)
+    
+    db_receipt = ReceiptModel(
+        receipt_number=receipt_number,
+        receipt_type=receipt.receipt_type,
+        operator=current_username,
+        remark=receipt.remark,
+        asset_count=0
+    )
+    db.add(db_receipt)
+    db.commit()
+    db.refresh(db_receipt)
+    
+    return db_receipt
+
+@router.get("/", response_model=List[Receipt])
+def get_receipts(
+    receipt_type: Optional[ReceiptType] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """获取入库单列表"""
+    query = db.query(ReceiptModel)
+    if receipt_type:
+        query = query.filter(ReceiptModel.receipt_type == receipt_type)
+    receipts = query.order_by(ReceiptModel.created_at.desc()).offset(skip).limit(limit).all()
+    return receipts
+
+@router.get("/{receipt_id}", response_model=ReceiptDetail)
+def get_receipt(
+    receipt_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """获取入库单详情"""
+    receipt = db.query(ReceiptModel).options(
+        joinedload(ReceiptModel.items).joinedload(ReceiptItemModel.asset)
+    ).filter(ReceiptModel.id == receipt_id).first()
+    
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="入库单未找到")
+    
+    # 构建包含资产详细信息的明细列表
+    items_detail = []
+    for item in receipt.items:
+        asset = item.asset
+        items_detail.append({
+            "id": item.id,
+            "receipt_id": item.receipt_id,
+            "asset_id": asset.id,
+            "asset_code": getattr(asset, 'asset_code', None),
+            "sn": asset.sn,
+            "brand": asset.brand,
+            "model": asset.model,
+            "status": asset.status,
+            "user": asset.user,
+            "location": asset.location,
+            "department": asset.department,
+            "created_at": item.created_at,
+        })
+    
+    # 重新计算实际的资产数量
+    actual_count = len(items_detail)
+    
+    # 如果实际数量与数据库中的数量不一致，更新数据库
+    if receipt.asset_count != actual_count:
+        receipt.asset_count = actual_count
+        db.commit()
+        db.refresh(receipt)
+    
+    # 构建响应对象
+    receipt_detail = ReceiptDetail(
+        id=receipt.id,
+        receipt_number=receipt.receipt_number,
+        receipt_type=receipt.receipt_type,
+        operator=receipt.operator,
+        remark=receipt.remark,
+        asset_count=actual_count,
+        created_at=receipt.created_at,
+        updated_at=receipt.updated_at,
+        items=items_detail
+    )
+    
+    return receipt_detail
+
+@router.post("/{receipt_id}/items", response_model=ReceiptItemSchema)
+def add_receipt_item(
+    receipt_id: int, 
+    asset_id: int = Query(...), 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """向入库单添加资产"""
+    # 检查入库单是否存在
+    receipt = db.query(ReceiptModel).filter(ReceiptModel.id == receipt_id).first()
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="入库单未找到")
+    
+    # 检查资产是否存在
+    asset = db.query(AssetModel).filter(AssetModel.id == asset_id).first()
+    if asset is None:
+        raise HTTPException(status_code=404, detail="资产未找到")
+    
+    # 检查资产是否已经在该入库单中
+    existing_item = db.query(ReceiptItemModel).filter(
+        ReceiptItemModel.receipt_id == receipt_id,
+        ReceiptItemModel.asset_id == asset_id
+    ).first()
+    if existing_item:
+        raise HTTPException(status_code=400, detail="该资产已在此入库单中")
+    
+    # 创建入库单明细
+    receipt_item = ReceiptItemModel(
+        receipt_id=receipt_id,
+        asset_id=asset_id
+    )
+    db.add(receipt_item)
+    
+    # 更新入库单的资产数量
+    receipt.asset_count = db.query(ReceiptItemModel).filter(
+        ReceiptItemModel.receipt_id == receipt_id
+    ).count() + 1
+    
+    db.commit()
+    db.refresh(receipt_item)
+    
+    return receipt_item
+
+@router.delete("/{receipt_id}")
+def delete_receipt(
+    receipt_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(require_admin)
+):
+    """删除入库单（只有空入库单才能删除）"""
+    receipt = db.query(ReceiptModel).filter(ReceiptModel.id == receipt_id).first()
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="入库单未找到")
+    
+    # 检查入库单是否有资产
+    if receipt.asset_count > 0:
+        raise HTTPException(status_code=400, detail="入库单包含资产，无法删除")
+    
+    # 删除入库单明细（应该为空，但为了安全还是删除）
+    db.query(ReceiptItemModel).filter(ReceiptItemModel.receipt_id == receipt_id).delete()
+    
+    # 删除入库单
+    db.delete(receipt)
+    db.commit()
+    
+    return {"message": "入库单已删除"}
+
+@router.delete("/{receipt_id}/items/{item_id}")
+def revoke_receipt_item(
+    receipt_id: int, 
+    item_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(require_admin)
+):
+    """撤销入库单中的资产（仅限两天内录入的资产）"""
+    # 检查入库单是否存在
+    receipt = db.query(ReceiptModel).filter(ReceiptModel.id == receipt_id).first()
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="入库单未找到")
+    
+    # 检查入库单明细是否存在
+    receipt_item = db.query(ReceiptItemModel).filter(
+        ReceiptItemModel.id == item_id,
+        ReceiptItemModel.receipt_id == receipt_id
+    ).first()
+    if receipt_item is None:
+        raise HTTPException(status_code=404, detail="入库单明细未找到")
+    
+    # 检查资产是否在两天内录入
+    now = datetime.now(pytz.timezone('Asia/Shanghai'))
+    two_days_ago = now - timedelta(days=2)
+    
+    # 使用入库单明细的创建时间（资产添加到入库单的时间）
+    item_created_at = receipt_item.created_at
+    if item_created_at.tzinfo is None:
+        item_created_at = pytz.UTC.localize(item_created_at)
+    item_created_at = item_created_at.astimezone(pytz.timezone('Asia/Shanghai'))
+    
+    if item_created_at < two_days_ago:
+        raise HTTPException(status_code=400, detail="只能撤销两天内录入的资产")
+    
+    # 获取资产信息
+    asset = db.query(AssetModel).filter(AssetModel.id == receipt_item.asset_id).first()
+    if asset is None:
+        raise HTTPException(status_code=404, detail="资产未找到")
+    
+    asset_code = getattr(asset, 'asset_code', None)
+    asset_sn = asset.sn
+    
+    # 先删除资产的历史记录（避免外键约束错误）
+    from app.models.asset import AssetHistory as AssetHistoryModel
+    db.query(AssetHistoryModel).filter(AssetHistoryModel.asset_id == asset.id).delete()
+    
+    # 删除资产（硬删除，因为撤销入库意味着资产不应该存在）
+    db.delete(asset)
+    
+    # 删除入库单明细
+    db.delete(receipt_item)
+    
+    # 更新入库单的资产数量
+    remaining_count = db.query(ReceiptItemModel).filter(
+        ReceiptItemModel.receipt_id == receipt_id
+    ).count()
+    receipt.asset_count = remaining_count
+    
+    # 如果入库单为空，删除入库单
+    receipt_deleted = False
+    if remaining_count == 0:
+        db.delete(receipt)
+        receipt_deleted = True
+    
+    db.commit()
+    
+    return {
+        "message": "资产已撤销入库",
+        "asset_code": asset_code,
+        "sn": asset_sn,
+        "receipt_deleted": receipt_deleted
+    }

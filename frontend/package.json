@@ -1,0 +1,19 @@
+{
+  "name": "server-management-frontend",
+  "version": "1.0.0",
+  "description": "物理服务器管理系统前端",
+  "main": "src/main.jsx",
+  "scripts": {
+    "start": "vite",
+    "build": "vite build",
+    "serve": "vite preview"
+  },
+  "dependencies": {
+    "react": "^17.0.2",
+    "react-dom": "^17.0.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^1.0.0",
+    "vite": "^2.5.0"
+  }
+}
