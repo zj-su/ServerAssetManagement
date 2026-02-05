@@ -19,9 +19,47 @@ from openpyxl.utils import get_column_letter
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
+# 配件资产编码前缀映射（根据配件类型）
+ASSET_CODE_PREFIX_MAP = {
+    '内存': 'SY-MEM-',
+    '硬盘': 'SY-HDD-',
+    'CPU': 'SY-CPU-',
+    '网卡': 'SY-NIC-',
+    'RAID卡': 'SY-RAID-',
+    '其他': 'SY-OTH-',
+}
+ASSET_CODE_DEFAULT_PREFIX = "SY-PT-"
+ASSET_CODE_DIGITS = 4
+
+
+def _next_asset_code(db: Session, part_type: str = None) -> str:
+    """根据配件类型生成下一个资产编码，如 SY-MEM-0001, SY-HDD-0001 等"""
+    import re
+    prefix = ASSET_CODE_PREFIX_MAP.get(part_type, ASSET_CODE_DEFAULT_PREFIX)
+    
+    # 查询该前缀下已有的最大编号
+    assets = db.query(AssetModel).filter(
+        AssetModel.asset_code.isnot(None),
+        AssetModel.asset_code != "",
+        AssetModel.asset_code.like(f"{prefix}%")
+    ).all()
+    
+    numbers = []
+    # 提取编号部分
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$", re.IGNORECASE)
+    for a in assets:
+        if a.asset_code:
+            m = pattern.match(a.asset_code)
+            if m:
+                numbers.append(int(m.group(1)))
+    
+    next_num = (max(numbers) + 1) if numbers else 1
+    return f"{prefix}{next_num:0{ASSET_CODE_DIGITS}d}"
+
+
 # 定义字段名中英文映射
 FIELD_NAME_MAPPING = {
-    "sn": "序列号",
+    "sn": "序列号(SN)",
     "model": "型号",
     "brand": "品牌",
     "bmc_ip": "BMC IP",
@@ -35,7 +73,17 @@ FIELD_NAME_MAPPING = {
     "warranty_expiry": "保修到期",
     "status": "状态",
     "location": "位置",
-    "department": "部门"
+    "department": "部门",
+    "contract_number": "合同号",
+    "purchased_with_server_sn": "关联服务器SN",
+    "remark": "备注",
+    "part_type": "配件类型",
+    "capacity": "容量",
+    "capacity_unit": "容量单位",
+    "frequency": "频率",
+    "frequency_unit": "频率单位",
+    "interface_type": "接口类型",
+    "spec": "规格",
 }
 
 # 定义状态值中英文映射
@@ -136,9 +184,12 @@ def create_asset(
     if db_asset:
         raise HTTPException(status_code=400, detail="资产序列号已存在")
     
-    # 创建资产，默认状态为in_storage（在库）
-    asset_dict = asset.dict()
+    # 创建资产，默认状态为in_storage（在库）；资产编码根据配件类型自动生成
+    asset_dict = asset.dict(exclude_unset=True)
     asset_dict["status"] = "in_storage"
+    part_type = asset_dict.get("part_type", None)
+    generated_code = _next_asset_code(db, part_type)
+    asset_dict["asset_code"] = generated_code
     db_asset = AssetModel(**asset_dict)
     db.add(db_asset)
     db.commit()
@@ -156,7 +207,9 @@ def create_asset(
     )
     db.add(history_record)
     db.commit()
-    
+    db.refresh(db_asset)
+    if not getattr(db_asset, "asset_code", None) or str(db_asset.asset_code or "").strip() == "":
+        db_asset.asset_code = generated_code
     return db_asset
 
 @router.put("/{asset_id}", response_model=Asset)

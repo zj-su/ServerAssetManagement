@@ -30,9 +30,11 @@ class ReceiptCreate(ReceiptBase):
 class Receipt(ReceiptBase):
     id: int
     receipt_number: str
+    status: str = "draft"  # draft=草稿, submitted=已入库
     asset_count: int
     created_at: datetime
     updated_at: datetime
+    submitted_at: Optional[datetime] = None  # 入库时间
     items: List[ReceiptItem] = []
     
     class Config:

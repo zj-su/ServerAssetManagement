@@ -31,6 +31,14 @@ class Asset(Base):
     cpu_cores = Column(Integer, nullable=True)
     memory_gb = Column(Integer, nullable=True)
     disk_info = Column(Text, nullable=True)
+    # 配件专用字段
+    part_type = Column(String, nullable=True)       # 配件类型
+    capacity = Column(String, nullable=True)         # 容量（数值存字符串便于单位分离）
+    capacity_unit = Column(String, nullable=True)   # 容量单位
+    frequency = Column(String, nullable=True)        # 频率
+    frequency_unit = Column(String, nullable=True)  # 频率单位
+    interface_type = Column(String, nullable=True)   # 接口类型
+    spec = Column(String, nullable=True)            # 规格
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     deleted_at = Column(DateTime(timezone=True), nullable=True)  # 软删除时间戳

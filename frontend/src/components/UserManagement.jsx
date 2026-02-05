@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { userAPI } from '../services/api';
 
-const UserManagement = () => {
+/** initialUserType: 'local' | 'ad'，与左侧菜单「本地用户 / AD域用户」联动 */
+const UserManagement = ({ initialUserType = null }) => {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedUser, setSelectedUser] = useState(null);
   const [userGroups, setUserGroups] = useState([]);
   const [loadingGroups, setLoadingGroups] = useState(false);
+  const [userTypeTab, setUserTypeTab] = useState(initialUserType || 'local'); // local | ad
 
   // 获取用户列表
   const fetchUsers = async () => {
@@ -100,9 +102,36 @@ const UserManagement = () => {
     fetchUsers();
   }, []);
 
+  // 与左侧菜单联动：从「本地用户 / AD域用户」进入时同步 Tab
+  useEffect(() => {
+    if (initialUserType && (initialUserType === 'local' || initialUserType === 'ad')) {
+      setUserTypeTab(initialUserType);
+    }
+  }, [initialUserType]);
+
+  const filteredUsers = userTypeTab === 'ad'
+    ? users.filter((u) => u.is_ad_user)
+    : users.filter((u) => !u.is_ad_user);
+
   return (
     <div style={{ padding: '20px' }}>
       <h2>用户管理</h2>
+
+      {/* 本地用户 / AD域用户 Tab */}
+      <div className="tabs" style={{ marginBottom: '16px', display: 'flex', gap: '8px' }}>
+        <button
+          className={userTypeTab === 'local' ? 'tab active' : 'tab'}
+          onClick={() => setUserTypeTab('local')}
+        >
+          本地用户
+        </button>
+        <button
+          className={userTypeTab === 'ad' ? 'tab active' : 'tab'}
+          onClick={() => setUserTypeTab('ad')}
+        >
+          AD域用户
+        </button>
+      </div>
       
       {/* 搜索栏 */}
       <div style={{ marginBottom: '20px', display: 'flex', gap: '10px' }}>
@@ -120,9 +149,11 @@ const UserManagement = () => {
         <button onClick={fetchUsers} style={{ padding: '8px 16px' }}>
           刷新
         </button>
-        <button onClick={syncAllAdUsers} style={{ padding: '8px 16px', backgroundColor: '#28a745', color: 'white' }}>
-          同步所有AD域用户
-        </button>
+        {userTypeTab === 'ad' && (
+          <button onClick={syncAllAdUsers} style={{ padding: '8px 16px', backgroundColor: '#28a745', color: 'white' }}>
+            同步所有AD域用户
+          </button>
+        )}
       </div>
 
       {/* 用户列表 */}
@@ -149,7 +180,7 @@ const UserManagement = () => {
                 </td>
               </tr>
             ) : (
-              users.map((user) => (
+              filteredUsers.map((user) => (
                 <tr key={user.id}>
                   <td style={{ padding: '10px', border: '1px solid #ddd' }}>{user.id}</td>
                   <td style={{ padding: '10px', border: '1px solid #ddd' }}>{user.username}</td>

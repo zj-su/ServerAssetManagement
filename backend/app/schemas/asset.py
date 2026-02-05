@@ -51,6 +51,13 @@ class AssetBase(BaseModel):
     cpu_cores: Optional[int] = None
     memory_gb: Optional[int] = None
     disk_info: Optional[str] = None
+    part_type: Optional[str] = None
+    capacity: Optional[str] = None
+    capacity_unit: Optional[str] = None
+    frequency: Optional[str] = None
+    frequency_unit: Optional[str] = None
+    interface_type: Optional[str] = None
+    spec: Optional[str] = None
 
 # 创建资产模型
 class AssetCreate(AssetBase):
@@ -81,6 +88,13 @@ class AssetUpdate(BaseModel):
     cpu_cores: Optional[int] = None
     memory_gb: Optional[int] = None
     disk_info: Optional[str] = None
+    part_type: Optional[str] = None
+    capacity: Optional[str] = None
+    capacity_unit: Optional[str] = None
+    frequency: Optional[str] = None
+    frequency_unit: Optional[str] = None
+    interface_type: Optional[str] = None
+    spec: Optional[str] = None
 
 # 资产数据库模型
 class AssetInDBBase(AssetBase):

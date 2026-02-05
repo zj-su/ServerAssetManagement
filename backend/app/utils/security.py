@@ -12,8 +12,8 @@ from app.models.user import User as UserModel
 # 密码加密上下文
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# HTTP Bearer认证
-security = HTTPBearer()
+# HTTP Bearer认证（auto_error=False 使缺少 header 时返回 None，由 get_current_user 统一返回 401）
+security = HTTPBearer(auto_error=False)
 
 # JWT相关函数
 def verify_password(plain_password, hashed_password):
@@ -53,22 +53,28 @@ def verify_token(token: str) -> Optional[dict]:
         return None
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: Session = Depends(get_db)
 ) -> UserModel:
     """
     从JWT token中获取当前登录用户
     
     Args:
-        credentials: HTTP Bearer认证凭据
+        credentials: HTTP Bearer认证凭据（缺省时为 None）
         db: 数据库会话
         
     Returns:
         当前用户对象
         
     Raises:
-        HTTPException: 如果token无效或用户不存在
+        HTTPException: 如果未提供 token 或 token 无效或用户不存在
     """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="未提供认证信息",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     token = credentials.credentials
     payload = verify_token(token)
     

@@ -2,17 +2,24 @@ import React, { useState, useEffect } from 'react';
 import { assetAPI } from '../services/api';
 
 /**
- * 资产报废管理 - 待报废资产列表、已报废资产列表、报废操作
- * 与项目介绍 3.1 资产管理模块 - 报废流程 一致
+ * 资产报废管理 - 待报废资产、报废资产、删除回收站（支持 initialTab 与左侧菜单联动）
  */
-const AssetScrapManagement = () => {
-  const [activeTab, setActiveTab] = useState('pending'); // pending | scrapped
+const AssetScrapManagement = ({ initialTab = 'pending' }) => {
+  const [activeTab, setActiveTab] = useState(initialTab); // pending | scrapped | recycle
   const [pendingAssets, setPendingAssets] = useState([]);
   const [scrappedAssets, setScrappedAssets] = useState([]);
+  const [deletedAssets, setDeletedAssets] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState(null);
   const [showDetail, setShowDetail] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+
+  // 与左侧菜单联动：外部切换菜单时同步 Tab
+  useEffect(() => {
+    if (initialTab && initialTab !== activeTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab]);
 
   const fetchPendingScrap = async () => {
     try {
@@ -40,9 +47,35 @@ const AssetScrapManagement = () => {
     }
   };
 
+  const fetchDeleted = async () => {
+    try {
+      setLoading(true);
+      const response = await assetAPI.getDeletedAssets();
+      setDeletedAssets(response.data || []);
+    } catch (err) {
+      console.error('获取回收站列表失败:', err);
+      alert('获取回收站列表失败: ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const restoreFromRecycle = async (assetId) => {
+    if (!window.confirm('确定要从回收站恢复该资产吗？')) return;
+    try {
+      await assetAPI.restoreAsset(assetId);
+      alert('已恢复');
+      fetchDeleted();
+    } catch (err) {
+      console.error('恢复失败:', err);
+      alert('恢复失败: ' + (err.response?.data?.detail || err.message));
+    }
+  };
+
   useEffect(() => {
     if (activeTab === 'pending') fetchPendingScrap();
-    else fetchScrapped();
+    else if (activeTab === 'scrapped') fetchScrapped();
+    else if (activeTab === 'recycle') fetchDeleted();
   }, [activeTab]);
 
   const confirmScrap = async (assetId) => {
@@ -103,50 +136,65 @@ const AssetScrapManagement = () => {
     return map[status] || status;
   };
 
-  const renderTable = (list, isPending) => (
-    <table>
-      <thead>
-        <tr>
-          <th>SN</th>
-          <th>品牌</th>
-          <th>型号</th>
-          <th>BMC IP</th>
-          <th>使用人</th>
-          <th>状态</th>
-          <th>部门</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {list.length === 0 ? (
+  const renderTable = (list, options = {}) => {
+    const { isPending, isRecycle } = options;
+    return (
+      <table>
+        <thead>
           <tr>
-            <td colSpan="8" style={{ padding: '20px', textAlign: 'center' }}>暂无数据</td>
+            <th>SN</th>
+            <th>品牌</th>
+            <th>型号</th>
+            <th>BMC IP</th>
+            <th>使用人</th>
+            <th>状态</th>
+            <th>部门</th>
+            <th>操作</th>
           </tr>
-        ) : (
-          list.map((asset) => (
-            <tr key={asset.id}>
-              <td>{asset.sn}</td>
-              <td>{asset.brand || '-'}</td>
-              <td>{asset.model}</td>
-              <td>{asset.bmc_ip || '-'}</td>
-              <td>{asset.user || '-'}</td>
-              <td><span className={`status ${asset.status}`}>{statusText(asset.status)}</span></td>
-              <td>{asset.department || '-'}</td>
-              <td>
-                <button className="btn-info" onClick={() => viewDetail(asset.id)}>详情</button>
-                {isPending && (
-                  <>
-                    <button className="btn-success" onClick={() => confirmScrap(asset.id)}>确认报废</button>
-                    <button className="btn-danger" onClick={() => deleteToRecycle(asset.id)}>移至回收站</button>
-                  </>
-                )}
-              </td>
+        </thead>
+        <tbody>
+          {list.length === 0 ? (
+            <tr>
+              <td colSpan="8" style={{ padding: '20px', textAlign: 'center' }}>暂无数据</td>
             </tr>
-          ))
-        )}
-      </tbody>
-    </table>
-  );
+          ) : (
+            list.map((asset) => (
+              <tr key={asset.id}>
+                <td>{asset.sn}</td>
+                <td>{asset.brand || '-'}</td>
+                <td>{asset.model}</td>
+                <td>{asset.bmc_ip || '-'}</td>
+                <td>{asset.user || '-'}</td>
+                <td><span className={`status ${asset.status}`}>{statusText(asset.status)}</span></td>
+                <td>{asset.department || '-'}</td>
+                <td>
+                  <button className="btn-info" onClick={() => viewDetail(asset.id)}>详情</button>
+                  {isPending && (
+                    <>
+                      <button className="btn-success" onClick={() => confirmScrap(asset.id)}>确认报废</button>
+                      <button className="btn-danger" onClick={() => deleteToRecycle(asset.id)}>移至回收站</button>
+                    </>
+                  )}
+                  {isRecycle && (
+                    <button className="btn-success" onClick={() => restoreFromRecycle(asset.id)}>恢复</button>
+                  )}
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    );
+  };
+
+  const onRefresh = () => {
+    if (activeTab === 'pending') fetchPendingScrap();
+    else if (activeTab === 'scrapped') fetchScrapped();
+    else if (activeTab === 'recycle') fetchDeleted();
+  };
+
+  const currentList = activeTab === 'pending' ? pendingAssets : activeTab === 'scrapped' ? scrappedAssets : deletedAssets;
+  const tableOptions = activeTab === 'pending' ? { isPending: true } : activeTab === 'recycle' ? { isRecycle: true } : {};
 
   return (
     <div className="asset-scrap-management" style={{ padding: '20px' }}>
@@ -156,24 +204,28 @@ const AssetScrapManagement = () => {
           className={activeTab === 'pending' ? 'tab active' : 'tab'}
           onClick={() => setActiveTab('pending')}
         >
-          待报废资产
+          资产待报废
         </button>
         <button
           className={activeTab === 'scrapped' ? 'tab active' : 'tab'}
           onClick={() => setActiveTab('scrapped')}
         >
-          已报废资产
+          报废资产
+        </button>
+        <button
+          className={activeTab === 'recycle' ? 'tab active' : 'tab'}
+          onClick={() => setActiveTab('recycle')}
+        >
+          删除回收站
         </button>
       </div>
       <div className="section-header" style={{ marginBottom: '12px' }}>
-        <button className="btn-secondary" onClick={() => activeTab === 'pending' ? fetchPendingScrap() : fetchScrapped()}>
-          刷新
-        </button>
+        <button className="btn-secondary" onClick={onRefresh}>刷新</button>
       </div>
       {loading ? (
         <p>加载中...</p>
       ) : (
-        renderTable(activeTab === 'pending' ? pendingAssets : scrappedAssets, activeTab === 'pending')
+        renderTable(currentList, tableOptions)
       )}
 
       {/* 资产详情弹窗 */}

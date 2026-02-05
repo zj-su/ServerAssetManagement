@@ -1,29 +1,4 @@
 // API服务模块
-const BASE_URL = '/api/v1';
-
-// 通用请求函数
-const request = async (url, options = {}) => {
-  try {
-    const response = await fetch(`${BASE_URL}${url}`, {
-      headers: {
-        'Content-Type': 'application/json',
-        ...options.headers,
-      },
-      ...options,
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
-    }
-
-    return await response.json();
-  } catch (error) {
-    console.error('API request failed:', error);
-    throw error;
-  }
-};
-
 import axios from 'axios';
 
 // 使用相对路径，开发时由 Vite 代理到后端，支持远程访问
@@ -58,7 +33,8 @@ api.interceptors.response.use(
     }
     const status = error.response?.status;
     const detail = error.response?.data?.detail;
-    const isAuthError = status === 401 || (status === 403 && (detail === 'Not authenticated' || detail === '无效的认证token' || detail === '用户不存在'));
+    const authDetails = ['Not authenticated', '无效的认证token', '用户不存在', '未提供认证信息'];
+    const isAuthError = status === 401 || (status === 403 && (typeof detail === 'string' && authDetails.some(d => detail.includes(d))));
     if (isAuthError) {
       localStorage.removeItem('auth_token');
       localStorage.removeItem('auth_user');
@@ -77,8 +53,8 @@ export const serverAPI = {
   // 获取服务器详情
   getServer: (id) => api.get(`/servers/${id}`),
   
-  // 创建服务器
-  createServer: (data) => api.post('/servers', data),
+  // 创建服务器（带尾斜杠避免 307 重定向导致 403）
+  createServer: (data) => api.post('/servers/', data),
   
   // 更新服务器
   updateServer: (id, data) => api.put(`/servers/${id}`, data),
@@ -94,6 +70,16 @@ export const serverAPI = {
   
   // 服务器重启
   reboot: (id) => api.post(`/servers/${id}/power/reboot`),
+
+  // 批量导入：POST /api/v1/import-servers/（带尾斜杠避免 307 重定向导致 405）
+  importServers: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/import-servers/', formData);
+  },
+
+  // 获取服务器历史记录
+  getServerHistory: (id) => api.get(`/servers/${id}/history`),
 };
 
 // 认证相关API
@@ -127,8 +113,8 @@ export const assetAPI = {
   // 获取资产详情
   getAsset: (id) => api.get(`/assets/${id}`),
   
-  // 创建资产
-  createAsset: (data) => api.post('/assets', data),
+  // 创建资产（带尾斜杠避免 307 重定向导致 403）
+  createAsset: (data) => api.post('/assets/', data),
   
   // 更新资产
   updateAsset: (id, data) => api.put(`/assets/${id}`, data),
@@ -158,29 +144,32 @@ export const assetAPI = {
   searchAssets: (query) => api.get(`/assets/search?query=${query}`),
 };
 
-// 入库单相关API（带尾部斜杠避免 307）
+// 入库单相关API（带尾部斜杠避免 307 重定向导致 Authorization 丢失、触发登出）
 export const receiptAPI = {
   // 获取入库单列表
   getReceipts: (receiptType) => {
     if (receiptType) {
-      return api.get('/receipts/', { params: { receipt_type: receiptType } });
+      return api.get('/receipts', { params: { receipt_type: receiptType } });
     }
-    return api.get('/receipts/');
+    return api.get('/receipts');
   },
   
   // 获取入库单详情
   getReceipt: (id) => api.get(`/receipts/${id}`),
   
-  // 创建入库单
+  // 创建入库单（路径需与后端一致，无尾斜杠，避免 307 重定向）
   createReceipt: (data) => api.post('/receipts', data),
   
-  // 删除入库单
+  // 提交入库（草稿 → 已入库）
+  submitReceipt: (id) => api.post(`/receipts/${id}/submit`),
+  
+  // 删除入库单（仅草稿可删）
   deleteReceipt: (id) => api.delete(`/receipts/${id}`),
   
-  // 添加资产到入库单
+  // 添加资产到入库单（仅草稿可添加）
   addReceiptItem: (receiptId, assetId) => api.post(`/receipts/${receiptId}/items?asset_id=${assetId}`),
   
-  // 撤销入库单资产
+  // 移除/撤销明细：草稿=仅移除；已入库=撤销（2天内，需管理员）
   revokeReceiptItem: (receiptId, itemId) => api.delete(`/receipts/${receiptId}/items/${itemId}`),
 };
 
@@ -220,50 +209,11 @@ export const adConfigAPI = {
   testConfig: (data) => api.post('/ad-config/test', data),
 };
 
-// 部署相关API
-export const deploymentAPI = {
-  getDeployments: (params = {}) => {
-    const queryString = new URLSearchParams(params).toString();
-    return request(`/deployments${queryString ? `?${queryString}` : ''}`);
-  },
-
-  createDeployment: (deploymentData) => request('/deployments', {
-    method: 'POST',
-    body: JSON.stringify(deploymentData),
-  }),
-
-  getDeployment: (id) => request(`/deployments/${id}`),
-
-  updateDeployment: (id, deploymentData) => request(`/deployments/${id}`, {
-    method: 'PUT',
-    body: JSON.stringify(deploymentData),
-  }),
-
-  deleteDeployment: (id) => request(`/deployments/${id}`, {
-    method: 'DELETE',
-  }),
-};
-
-// 监控相关API
-export const monitoringAPI = {
-  getMonitoringData: (params = {}) => {
-    const queryString = new URLSearchParams(params).toString();
-    return request(`/monitoring${queryString ? `?${queryString}` : ''}`);
-  },
-
-  getServerMonitoringData: (serverId, params = {}) => {
-    const queryString = new URLSearchParams(params).toString();
-    return request(`/monitoring/server/${serverId}${queryString ? `?${queryString}` : ''}`);
-  },
-
-  createMonitoringData: (monitoringData) => request('/monitoring', {
-    method: 'POST',
-    body: JSON.stringify(monitoringData),
-  }),
-};
-
 export default {
   serverAPI,
-  deploymentAPI,
-  monitoringAPI,
+  authAPI,
+  assetAPI,
+  receiptAPI,
+  userAPI,
+  adConfigAPI,
 };

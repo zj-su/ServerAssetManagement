@@ -8,17 +8,26 @@ class ReceiptType(str, enum.Enum):
     SERVER = "server"  # 服务器入库单
     PART = "part"      # 配件入库单
 
+
+class ReceiptStatus(str, enum.Enum):
+    """入库单状态：业界常见流转 草稿 → 已入库"""
+    DRAFT = "draft"        # 草稿：可编辑、可删
+    SUBMITTED = "submitted"  # 已入库：不可改明细，仅可按规定撤销
+
+
 class Receipt(Base):
     __tablename__ = "receipts"
     
     id = Column(Integer, primary_key=True, index=True)
     receipt_number = Column(String, unique=True, index=True, nullable=False)  # 入库单号（自动生成）
     receipt_type = Column(SQLEnum(ReceiptType), nullable=False)  # 入库单类型：server或part
-    operator = Column(String, nullable=False)  # 操作人（由后端从当前登录用户获取）
+    status = Column(String, default=ReceiptStatus.DRAFT.value, nullable=False)  # 状态：draft / submitted
+    operator = Column(String, nullable=False)  # 制单人/操作人
     remark = Column(Text)  # 备注
     asset_count = Column(Integer, default=0)  # 资产数量
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())   # 制单时间
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    submitted_at = Column(DateTime(timezone=True), nullable=True)  # 入库时间（提交时写入）
     
     # 关联入库单明细
     items = relationship("ReceiptItem", back_populates="receipt", cascade="all, delete-orphan")

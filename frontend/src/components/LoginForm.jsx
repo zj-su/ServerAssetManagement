@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { authAPI } from '../services/api';
 import '../App.css';
 
@@ -7,6 +7,11 @@ function LoginForm({ onLogin }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -19,23 +24,29 @@ function LoginForm({ onLogin }) {
     try {
       setLoading(true);
       setError('');
-      
-      // 使用真实API进行登录（axios 返回 response.data 为后端 body）
       const res = await authAPI.login({ username, password });
-      const token = res.data?.access_token;
-      if (!token) throw new Error('登录响应无效');
-      onLogin({ username: username, token });
+      if (!isMountedRef.current) return;
+      const data = res.data;
+      const token = data?.access_token ?? data?.token ?? data?.data?.access_token ?? data?.data?.token;
+      if (!token || typeof token !== 'string') {
+        setError('登录响应异常，请重试');
+        return;
+      }
+      localStorage.setItem('auth_token', token);
+      localStorage.setItem('auth_user', JSON.stringify({ username }));
+      onLogin({ username, token });
     } catch (err) {
+      if (!isMountedRef.current) return;
       const detail = err.response?.data?.detail;
       const msg = Array.isArray(detail)
         ? detail.map((d) => d.msg || d.loc?.join('.')).join('; ')
         : typeof detail === 'string'
           ? detail
-          : err.message || '用户名或密码错误';
+          : err.message || '网络异常或用户名/密码错误';
       setError('登录失败: ' + msg);
       console.error('Login error:', err);
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) setLoading(false);
     }
   };
 
@@ -50,6 +61,7 @@ function LoginForm({ onLogin }) {
             <input
               type="text"
               id="username"
+              autoComplete="username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder="请输入用户名"
@@ -62,6 +74,7 @@ function LoginForm({ onLogin }) {
             <input
               type="password"
               id="password"
+              autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="请输入密码"
