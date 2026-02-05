@@ -19,7 +19,11 @@ class ReceiptItem(ReceiptItemBase):
 # 入库单基础模型
 class ReceiptBase(BaseModel):
     receipt_type: ReceiptType
-    operator: Optional[str] = None  # 操作人，由后端从当前登录用户获取，前端不需要传递
+    operator: Optional[str] = None  # 操作人/入库人，由后端从当前登录用户获取，前端不需要传递
+    purchaser: Optional[str] = None  # 采购人
+    company: Optional[str] = None  # 所属/承租公司
+    department: Optional[str] = None  # 资产归属部门
+    receipt_date: Optional[datetime] = None  # 入库日期
     remark: Optional[str] = None
 
 # 创建入库单模型
@@ -31,6 +35,10 @@ class Receipt(ReceiptBase):
     id: int
     receipt_number: str
     status: str = "draft"  # draft=草稿, submitted=已入库
+    purchaser: Optional[str] = None  # 采购人
+    company: Optional[str] = None  # 所属/承租公司
+    department: Optional[str] = None  # 资产归属部门
+    receipt_date: Optional[datetime] = None  # 入库日期
     asset_count: int
     created_at: datetime
     updated_at: datetime

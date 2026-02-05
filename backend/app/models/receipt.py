@@ -22,7 +22,11 @@ class Receipt(Base):
     receipt_number = Column(String, unique=True, index=True, nullable=False)  # 入库单号（自动生成）
     receipt_type = Column(SQLEnum(ReceiptType), nullable=False)  # 入库单类型：server或part
     status = Column(String, default=ReceiptStatus.DRAFT.value, nullable=False)  # 状态：draft / submitted
-    operator = Column(String, nullable=False)  # 制单人/操作人
+    operator = Column(String, nullable=False)  # 制单人/操作人（入库人）
+    purchaser = Column(String, nullable=True)  # 采购人
+    company = Column(String, nullable=True)  # 所属/承租公司
+    department = Column(String, nullable=True)  # 资产归属部门
+    receipt_date = Column(DateTime(timezone=True), nullable=True)  # 入库日期
     remark = Column(Text)  # 备注
     asset_count = Column(Integer, default=0)  # 资产数量
     created_at = Column(DateTime(timezone=True), server_default=func.now())   # 制单时间

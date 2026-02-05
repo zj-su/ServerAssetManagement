@@ -7,7 +7,7 @@ import ServerReceiptManagement from './components/ServerReceiptManagement';
 import LoginForm from './components/LoginForm';
 import UserManagement from './components/UserManagement';
 import ADConfigManagement from './components/ADConfigManagement';
-import { serverAPI } from './services/api';
+import { serverAPI, assetAPI } from './services/api';
 import './App.css';
 
 function App() {
@@ -39,8 +39,14 @@ function App() {
   // 服务器历史记录
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [serverHistoryData, setServerHistoryData] = useState([]);
-  const [historyServerId, setHistoryServerId] = useState(null);
+  const [historyServerAssetCode, setHistoryServerAssetCode] = useState(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+
+  // 服务器关联配件弹窗
+  const [showPartsModal, setShowPartsModal] = useState(false);
+  const [serverPartsData, setServerPartsData] = useState([]);
+  const [partsServerInfo, setPartsServerInfo] = useState(null);
+  const [partsLoading, setPartsLoading] = useState(false);
 
   // 服务器表单状态（与服务器模块字段一致；asset_code 仅编辑时显示，添加时自动生成）
   const [serverFormData, setServerFormData] = useState({
@@ -248,10 +254,10 @@ function App() {
   };
 
   // 查看服务器历史记录
-  const viewServerHistory = async (serverId) => {
+  const viewServerHistory = async (serverId, assetCode) => {
     try {
       setHistoryLoading(true);
-      setHistoryServerId(serverId);
+      setHistoryServerAssetCode(assetCode || '-');
       setShowHistoryModal(true);
       
       const result = await serverAPI.getServerHistory(serverId);
@@ -269,7 +275,61 @@ function App() {
   const closeHistoryModal = () => {
     setShowHistoryModal(false);
     setServerHistoryData([]);
-    setHistoryServerId(null);
+    setHistoryServerAssetCode(null);
+  };
+
+  // 查看服务器关联配件
+  const viewServerParts = async (server) => {
+    if (!server.serial_number) {
+      alert('该服务器无序列号，无法查看关联配件');
+      return;
+    }
+    try {
+      setPartsLoading(true);
+      setPartsServerInfo({ asset_code: server.asset_code, serial_number: server.serial_number });
+      setShowPartsModal(true);
+      
+      const result = await assetAPI.getAssetsByServerSN(server.serial_number);
+      setServerPartsData(result.data || []);
+    } catch (err) {
+      console.error('Error fetching server parts:', err);
+      alert('获取关联配件失败: ' + (err.message || '未知错误'));
+      setServerPartsData([]);
+    } finally {
+      setPartsLoading(false);
+    }
+  };
+
+  // 关闭配件弹窗
+  const closePartsModal = () => {
+    setShowPartsModal(false);
+    setServerPartsData([]);
+    setPartsServerInfo(null);
+  };
+
+  // 配件状态文本
+  const partStatusText = (s) => {
+    const map = {
+      in_storage: '在库',
+      in_use: '使用中',
+      idle: '空闲',
+      pending_scrap: '待报废',
+      scrapped: '已报废'
+    };
+    return map[s] || s;
+  };
+
+  // 报废服务器
+  const scrapServer = async (serverId) => {
+    if (!window.confirm('确定要将此服务器标记为报废吗？')) return;
+    try {
+      await serverAPI.scrapServer(serverId);
+      alert('已标记为待报废');
+      fetchServers();
+    } catch (err) {
+      console.error('报废操作失败:', err);
+      alert('报废操作失败: ' + (err.response?.data?.detail || err.message));
+    }
   };
 
   // 查看服务器详情
@@ -405,19 +465,19 @@ function App() {
     }
   };
 
-  // 删除服务器
+  // 删除服务器（移至回收站）
   const deleteServer = async (serverId) => {
-    if (!window.confirm('确定要删除这台服务器吗？')) {
+    if (!window.confirm('确定要删除这台服务器吗？服务器将被移到回收站，可在资产报废模块中恢复。')) {
       return;
     }
     
     try {
-      await serverAPI.deleteServer(serverId);
-      alert('服务器删除成功');
+      await serverAPI.deleteServerToRecycle(serverId);
+      alert('服务器已移到回收站');
       fetchServers();
     } catch (err) {
       console.error('Error deleting server:', err);
-      alert('删除失败: ' + (err.message || '未知错误'));
+      alert('删除失败: ' + (err.response?.data?.detail || err.message || '未知错误'));
     }
   };
 
@@ -428,6 +488,18 @@ function App() {
       fetchRacks();
     }
   }, [isAuthenticated]);
+
+  // 监听服务器数据变化事件（入库/删除入库单时触发）
+  useEffect(() => {
+    const handleServerDataChanged = () => {
+      console.log('服务器数据已变化，自动刷新列表');
+      fetchServers();
+    };
+    window.addEventListener('serverDataChanged', handleServerDataChanged);
+    return () => {
+      window.removeEventListener('serverDataChanged', handleServerDataChanged);
+    };
+  }, []);
 
   // 根据当前激活菜单自动展开对应父级
   useEffect(() => {
@@ -596,7 +668,6 @@ function App() {
                 <h2>服务器概览</h2>
                 <div className="header-actions">
                   <button className="btn-refresh" onClick={fetchServers}>刷新</button>
-                  <button className="btn-primary" onClick={openCreateServerForm}>添加服务器</button>
                 </div>
               </div>
               
@@ -615,9 +686,9 @@ function App() {
                   style={{ padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '4px' }}
                 >
                   <option value="">全部状态</option>
-                  <option value="online">在线</option>
-                  <option value="offline">离线</option>
-                  <option value="maintenance">维护中</option>
+                  <option value="online">使用中</option>
+                  <option value="offline">空闲</option>
+                  <option value="maintenance">在库</option>
                 </select>
               </div>
 
@@ -678,16 +749,21 @@ function App() {
                           <td>{server.u_position || '-'}</td>
                           <td>
                             <span className={`status ${server.status}`}>
-                              {server.status === 'online' ? '在线' : 
-                               server.status === 'offline' ? '离线' : '维护中'}
+                              {server.status === 'online' ? '使用中' : 
+                               server.status === 'offline' ? '空闲' : 
+                               server.status === 'maintenance' ? '在库' :
+                               server.status === 'pending_scrap' ? '待报废' :
+                               server.status === 'scrapped' ? '已报废' : server.status}
                             </span>
                           </td>
                           <td>{server.location || '-'}</td>
                           <td>{server.department || '-'}</td>
                           <td>
                             <button className="btn-primary" onClick={() => viewServerDetail(server.id)}>详情</button>
+                            <button className="btn-success" onClick={() => viewServerParts(server)}>配件</button>
                             <button className="btn-secondary" onClick={() => openEditServerForm(server)}>编辑</button>
-                            <button className="btn-info" onClick={() => viewServerHistory(server.id)}>历史</button>
+                            <button className="btn-info" onClick={() => viewServerHistory(server.id, server.asset_code)}>历史</button>
+                            <button className="btn-warning" onClick={() => scrapServer(server.id)}>报废</button>
                             <button className="btn-danger" onClick={() => deleteServer(server.id)}>删除</button>
                           </td>
                         </tr>
@@ -894,9 +970,9 @@ function App() {
                       <div className="form-group">
                         <label htmlFor="status">状态</label>
                         <select id="status" name="status" value={serverFormData.status} onChange={handleServerInputChange}>
-                          <option value="online">在线</option>
-                          <option value="offline">离线</option>
-                          <option value="maintenance">维护中</option>
+                          <option value="online">使用中</option>
+                          <option value="offline">空闲</option>
+                          <option value="maintenance">在库</option>
                         </select>
                       </div>
                       <div className="form-group">
@@ -933,7 +1009,7 @@ function App() {
         <div className="modal-overlay" onClick={closeHistoryModal}>
           <div className="modal-content history-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <h2>服务器历史记录 (ID: {historyServerId})</h2>
+              <h2>服务器历史记录 ({historyServerAssetCode})</h2>
               <button className="close-btn" onClick={closeHistoryModal}>&times;</button>
             </div>
             <div className="modal-body">
@@ -958,6 +1034,50 @@ function App() {
                         <td>{record.action || '-'}</td>
                         <td>{record.operator || '-'}</td>
                         <td className="history-remark">{record.remark || '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 服务器关联配件弹窗 */}
+      {showPartsModal && (
+        <div className="modal-overlay" onClick={closePartsModal}>
+          <div className="modal-content history-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>关联配件 ({partsServerInfo?.asset_code || partsServerInfo?.serial_number})</h2>
+              <button className="close-btn" onClick={closePartsModal}>&times;</button>
+            </div>
+            <div className="modal-body">
+              {partsLoading ? (
+                <div className="loading-state">加载中...</div>
+              ) : serverPartsData.length === 0 ? (
+                <div className="empty-state">暂无关联配件</div>
+              ) : (
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>资产编码</th>
+                      <th>SN</th>
+                      <th>类型</th>
+                      <th>品牌</th>
+                      <th>型号</th>
+                      <th>状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {serverPartsData.map(part => (
+                      <tr key={part.id}>
+                        <td>{part.asset_code || '-'}</td>
+                        <td>{part.sn || '-'}</td>
+                        <td>{part.part_type || '-'}</td>
+                        <td>{part.brand || '-'}</td>
+                        <td>{part.model || '-'}</td>
+                        <td><span className={`status ${part.status}`}>{partStatusText(part.status)}</span></td>
                       </tr>
                     ))}
                   </tbody>

@@ -72,14 +72,46 @@ export const serverAPI = {
   reboot: (id) => api.post(`/servers/${id}/power/reboot`),
 
   // 批量导入：POST /api/v1/import-servers/（带尾斜杠避免 307 重定向导致 405）
-  importServers: (file) => {
+  // receiptId 可选，如果传入则将服务器关联到该入库单
+  importServers: (file, receiptId = null) => {
     const formData = new FormData();
     formData.append('file', file);
-    return api.post('/import-servers/', formData);
+    const params = receiptId ? { receipt_id: receiptId } : {};
+    return api.post('/import-servers/', formData, { params });
   },
+  
+  // 下载服务器导入模板
+  downloadTemplate: () => api.get('/servers-template/', { responseType: 'blob' }),
 
   // 获取服务器历史记录
   getServerHistory: (id) => api.get(`/servers/${id}/history`),
+
+  // 搜索服务器（按SN、主机名、IP、资产编码）
+  searchServers: (q) => api.get(`/servers/search`, { params: { q } }),
+
+  // 报废服务器（移到待报废）
+  scrapServer: (id) => api.put(`/servers/${id}/scrap`),
+
+  // 确认报废服务器
+  confirmScrapServer: (id) => api.put(`/servers/${id}/confirm-scrap`),
+
+  // 获取待报废服务器列表
+  getPendingScrapServers: () => api.get('/servers/scrap/pending'),
+
+  // 获取已报废服务器列表
+  getScrappedServers: () => api.get('/servers/scrap/scrapped'),
+  
+  // 删除服务器（移至回收站，软删除）
+  deleteServerToRecycle: (id) => api.put(`/servers/${id}/delete`),
+  
+  // 获取已删除服务器列表（回收站）
+  getDeletedServers: () => api.get('/servers/deleted/list'),
+  
+  // 从回收站恢复服务器
+  restoreServer: (id) => api.put(`/servers/${id}/restore`),
+  
+  // 永久删除服务器（需要管理员权限）
+  permanentlyDeleteServer: (id) => api.delete(`/servers/${id}`),
 };
 
 // 认证相关API
@@ -137,11 +169,26 @@ export const assetAPI = {
   // 获取资产历史记录
   getAssetHistory: (id) => api.get(`/assets/${id}/history`),
   
+  // 根据服务器SN获取关联的配件
+  getAssetsByServerSN: (serverSN) => api.get(`/assets/by-server-sn/${encodeURIComponent(serverSN)}`),
+  
   // 添加资产历史记录
   addAssetHistory: (id, data) => api.post(`/assets/${id}/history`, data),
   
   // 搜索资产
   searchAssets: (query) => api.get(`/assets/search?query=${query}`),
+  
+  // 批量导入配件：POST /api/v1/import-assets/
+  importAssets: (file, receiptId) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    // 如果提供了入库单ID，将其作为查询参数传递
+    const url = receiptId ? `/import-assets/?receipt_id=${receiptId}` : '/import-assets/';
+    return api.post(url, formData);
+  },
+  
+  // 下载配件导入模板
+  downloadTemplate: () => api.get('/assets-template/', { responseType: 'blob' }),
 };
 
 // 入库单相关API（带尾部斜杠避免 307 重定向导致 Authorization 丢失、触发登出）

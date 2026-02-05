@@ -5,6 +5,7 @@ from datetime import datetime, date
 # 服务器基础模型（与服务器模块字段一致）
 class ServerBase(BaseModel):
     asset_code: Optional[str] = None          # 资产编码 SY-SR-0001，创建时自动生成
+    receipt_id: Optional[int] = None          # 关联入库单ID
     serial_number: Optional[str] = None       # 序列号(SN)
     hostname: Optional[str] = None
     ip_address: Optional[str] = None         # 系统IP

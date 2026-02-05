@@ -8,6 +8,7 @@ class Server(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     asset_code = Column(String, unique=True, index=True)  # 资产编码，规则 SY-SR-0001，添加时自动生成
+    receipt_id = Column(Integer, ForeignKey("receipts.id"), nullable=True)  # 关联入库单
     # 基础标识
     serial_number = Column(String, index=True)  # 序列号(SN)
     hostname = Column(String, index=True)  # 主机名，可与 SN 或系统IP 对应
@@ -43,6 +44,7 @@ class Server(Base):
     disk_info = Column(String)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    deleted_at = Column(DateTime(timezone=True), nullable=True)  # 软删除时间，非空表示已删除
     
     # 关联历史记录
     history_records = relationship("ServerHistory", back_populates="server")

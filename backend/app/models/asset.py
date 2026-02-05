@@ -10,7 +10,7 @@ class Asset(Base):
     id = Column(Integer, primary_key=True, index=True)
     sn = Column(String, unique=True, index=True, nullable=False)
     asset_code = Column(String, unique=True, index=True, nullable=True)  # 资产编码，自动生成
-    model = Column(String, nullable=False)
+    model = Column(String, nullable=True)  # 型号可为空
     brand = Column(String)
     bmc_ip = Column(String)
     user = Column(String)
@@ -42,6 +42,7 @@ class Asset(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     deleted_at = Column(DateTime(timezone=True), nullable=True)  # 软删除时间戳
+    receipt_id = Column(Integer, ForeignKey("receipts.id"), nullable=True)  # 关联入库单ID
     
     # 关联历史记录
     history_records = relationship("AssetHistory", back_populates="asset")

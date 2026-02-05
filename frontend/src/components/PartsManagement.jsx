@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { assetAPI } from '../services/api';
+import React, { useState, useEffect, useRef } from 'react';
+import { assetAPI, serverAPI } from '../services/api';
 import '../App.css';
 
 /**
@@ -98,10 +98,100 @@ const PartsManagement = () => {
     disk_info: ''
   });
 
+  // 服务器搜索选择相关状态
+  const [serverSearchText, setServerSearchText] = useState('');
+  const [serverSearchResults, setServerSearchResults] = useState([]);
+  const [showServerDropdown, setShowServerDropdown] = useState(false);
+  const [serverSearchLoading, setServerSearchLoading] = useState(false);
+  const serverSearchRef = useRef(null);
+  const serverDropdownRef = useRef(null);
+
+  // 搜索服务器
+  const searchServers = async (keyword) => {
+    if (!keyword || keyword.trim().length === 0) {
+      setServerSearchResults([]);
+      return;
+    }
+    try {
+      setServerSearchLoading(true);
+      const res = await serverAPI.searchServers(keyword.trim());
+      setServerSearchResults(res.data || []);
+    } catch (err) {
+      console.error('搜索服务器失败:', err);
+      setServerSearchResults([]);
+    } finally {
+      setServerSearchLoading(false);
+    }
+  };
+
+  // 防抖搜索
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (serverSearchText) {
+        searchServers(serverSearchText);
+      } else {
+        setServerSearchResults([]);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [serverSearchText]);
+
+  // 服务器状态映射到配件状态
+  const mapServerStatusToPartStatus = (serverStatus) => {
+    const statusMap = {
+      'online': 'in_use',         // 服务器使用中 → 配件使用中
+      'offline': 'idle',          // 服务器空闲 → 配件空闲
+      'maintenance': 'in_storage' // 服务器在库 → 配件在库
+    };
+    return statusMap[serverStatus] || 'in_storage';
+  };
+
+  // 选择服务器 - 自动同步使用人、部门、状态和位置
+  const selectServer = (server) => {
+    setFormData(prev => ({
+      ...prev,
+      purchased_with_server_sn: server.serial_number || '',
+      user: server.user_person || prev.user,
+      department: server.department || prev.department,
+      status: mapServerStatusToPartStatus(server.status),
+      location: server.location || prev.location
+    }));
+    setServerSearchText(`${server.serial_number || ''} (${server.hostname || server.ip_address || server.asset_code || ''})`);
+    setShowServerDropdown(false);
+    setServerSearchResults([]);
+  };
+
+  // 清除关联服务器
+  const clearServerSelection = () => {
+    setFormData(prev => ({
+      ...prev,
+      purchased_with_server_sn: '',
+      // 清除关联时不自动清空使用人和部门，保留用户可能修改的值
+    }));
+    setServerSearchText('');
+    setServerSearchResults([]);
+  };
+
+  // 点击外部关闭下拉框
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (
+        serverSearchRef.current && 
+        !serverSearchRef.current.contains(event.target) &&
+        serverDropdownRef.current &&
+        !serverDropdownRef.current.contains(event.target)
+      ) {
+        setShowServerDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   const fetchParts = async () => {
     try {
       setLoading(true);
-      const response = await assetAPI.getAssets('in_storage,in_use,maintenance');
+      const response = await assetAPI.getAssets('in_storage,in_use,idle');
       setParts(response.data || []);
     } catch (err) {
       console.error('获取配件列表失败:', err);
@@ -115,9 +205,21 @@ const PartsManagement = () => {
     fetchParts();
   }, []);
 
+  // 监听配件数据变化事件（入库/删除入库单时触发）
+  useEffect(() => {
+    const handleAssetDataChanged = () => {
+      console.log('配件数据已变化，自动刷新列表');
+      fetchParts();
+    };
+    window.addEventListener('assetDataChanged', handleAssetDataChanged);
+    return () => {
+      window.removeEventListener('assetDataChanged', handleAssetDataChanged);
+    };
+  }, []);
+
   const fmt = (v) => (v != null && v !== '' ? String(v) : '—');
   const fmtDate = (d) => (d ? new Date(d).toLocaleDateString('zh-CN') : '—');
-  const statusText = (s) => ({ in_storage: '在库', in_use: '使用中', maintenance: '维修中', pending_scrap: '报废', scrapped: '已报废', deleted: '已删除' }[s] || s);
+  const statusText = (s) => ({ in_storage: '在库', in_use: '使用中', idle: '空闲', pending_scrap: '报废', scrapped: '已报废', deleted: '已删除' }[s] || s);
 
   const displayAssetCode = (p) => (p.asset_code ? p.asset_code : '-');
 
@@ -155,6 +257,8 @@ const PartsManagement = () => {
       memory_gb: '',
       disk_info: ''
     });
+    setServerSearchText('');
+    setServerSearchResults([]);
     setShowForm(true);
   };
 
@@ -194,6 +298,9 @@ const PartsManagement = () => {
       memory_gb: asset.memory_gb ?? '',
       disk_info: asset.disk_info || ''
     });
+    // 如果有关联服务器SN，设置显示文本
+    setServerSearchText(asset.purchased_with_server_sn || '');
+    setServerSearchResults([]);
     setShowForm(true);
   };
 
@@ -342,7 +449,7 @@ const PartsManagement = () => {
   const filteredParts = parts.filter(p => {
     const q = searchText.toLowerCase();
     if (q) {
-      const fields = [p.asset_code, p.sn, p.brand, p.model, p.user, p.spec, p.part_type].map(v => (v || '').toLowerCase());
+      const fields = [p.asset_code, p.sn, p.brand, p.model, p.user, p.spec, p.part_type, p.purchased_with_server_sn].map(v => (v || '').toLowerCase());
       if (!fields.some(f => f.includes(q))) return false;
     }
     if (statusFilter && p.status !== statusFilter) return false;
@@ -356,7 +463,6 @@ const PartsManagement = () => {
         <h2>配件概览</h2>
         <div className="header-actions">
           <button className="btn-refresh" onClick={fetchParts}>刷新</button>
-          <button className="btn-primary" onClick={openCreate}>添加配件</button>
         </div>
       </div>
 
@@ -364,7 +470,7 @@ const PartsManagement = () => {
       <div className="filter-bar" style={{ display: 'flex', gap: '12px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
         <input
           type="text"
-          placeholder="搜索：资产编码/SN/品牌/型号/使用人/规格"
+          placeholder="搜索：资产编码/SN/品牌/型号/使用人/规格/关联服务器SN"
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
           style={{ padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '4px', minWidth: '280px' }}
@@ -377,7 +483,7 @@ const PartsManagement = () => {
           <option value="">全部状态</option>
           <option value="in_storage">在库</option>
           <option value="in_use">使用中</option>
-          <option value="maintenance">维修中</option>
+          <option value="idle">空闲</option>
         </select>
         <select
           value={partTypeFilter}
@@ -409,7 +515,7 @@ const PartsManagement = () => {
                 <th>接口类型</th>
                 <th>规格</th>
                 <th>使用人</th>
-                <th>关联服务器SN</th>
+                <th>关联服务器</th>
                 <th>状态</th>
                 <th>位置</th>
                 <th>部门</th>
@@ -582,16 +688,85 @@ const PartsManagement = () => {
                         <label>使用人</label>
                         <input type="text" name="user" value={formData.user} onChange={handleInputChange} />
                       </div>
-                      <div className="form-group">
-                        <label>关联服务器SN（采购带出）</label>
-                        <input type="text" name="purchased_with_server_sn" value={formData.purchased_with_server_sn} onChange={handleInputChange} placeholder="采购时随服务器带出" />
+                      <div className="form-group" style={{ position: 'relative' }}>
+                        <label>关联服务器</label>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <input 
+                            type="text" 
+                            ref={serverSearchRef}
+                            value={serverSearchText} 
+                            onChange={(e) => {
+                              setServerSearchText(e.target.value);
+                              setShowServerDropdown(true);
+                              // 如果清空了搜索框，也清空关联的SN
+                              if (!e.target.value) {
+                                setFormData(prev => ({ ...prev, purchased_with_server_sn: '' }));
+                              }
+                            }}
+                            onFocus={() => setShowServerDropdown(true)}
+                            placeholder="搜索SN/主机名/IP/资产编码..." 
+                            style={{ flex: 1 }}
+                          />
+                          {formData.purchased_with_server_sn && (
+                            <button type="button" className="btn-secondary" onClick={clearServerSelection} style={{ padding: '4px 8px' }}>清除</button>
+                          )}
+                        </div>
+                        {formData.purchased_with_server_sn && (
+                          <div style={{ fontSize: '12px', color: '#16a34a', marginTop: '4px' }}>
+                            已关联: {formData.purchased_with_server_sn}
+                          </div>
+                        )}
+                        {showServerDropdown && serverSearchText && (
+                          <div 
+                            ref={serverDropdownRef}
+                            style={{
+                              position: 'absolute',
+                              top: '100%',
+                              left: 0,
+                              right: 0,
+                              background: '#fff',
+                              border: '1px solid #e2e8f0',
+                              borderRadius: '4px',
+                              boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                              maxHeight: '200px',
+                              overflowY: 'auto',
+                              zIndex: 1000
+                            }}
+                          >
+                            {serverSearchLoading ? (
+                              <div style={{ padding: '12px', textAlign: 'center', color: '#64748b' }}>搜索中...</div>
+                            ) : serverSearchResults.length === 0 ? (
+                              <div style={{ padding: '12px', textAlign: 'center', color: '#94a3b8' }}>无匹配结果</div>
+                            ) : (
+                              serverSearchResults.map(server => (
+                                <div 
+                                  key={server.id}
+                                  onClick={() => selectServer(server)}
+                                  style={{
+                                    padding: '10px 12px',
+                                    cursor: 'pointer',
+                                    borderBottom: '1px solid #f1f5f9',
+                                    fontSize: '13px'
+                                  }}
+                                  onMouseEnter={(e) => e.target.style.background = '#f8fafc'}
+                                  onMouseLeave={(e) => e.target.style.background = '#fff'}
+                                >
+                                  <div style={{ fontWeight: 500 }}>{server.serial_number || '(无SN)'}</div>
+                                  <div style={{ color: '#64748b', fontSize: '12px' }}>
+                                    {server.hostname || '-'} | {server.ip_address || '-'} | {server.asset_code || '-'}
+                                  </div>
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        )}
                       </div>
                       <div className="form-group">
                         <label>状态</label>
                         <select name="status" value={formData.status} onChange={handleInputChange}>
                           <option value="in_storage">在库</option>
                           <option value="in_use">使用中</option>
-                          <option value="maintenance">维修中</option>
+                          <option value="idle">空闲</option>
                         </select>
                       </div>
                     </div>
@@ -682,7 +857,7 @@ const PartsManagement = () => {
                     <h3 className="detail-section-title">使用与位置</h3>
                     <div className="detail-grid">
                       <div className="detail-item"><span className="detail-label">使用人</span><span className="detail-value">{fmt(selectedPart.user)}</span></div>
-                      <div className="detail-item"><span className="detail-label">关联服务器SN</span><span className="detail-value">{fmt(selectedPart.purchased_with_server_sn)}</span></div>
+                      <div className="detail-item"><span className="detail-label">关联服务器</span><span className="detail-value">{fmt(selectedPart.purchased_with_server_sn)}</span></div>
                       <div className="detail-item"><span className="detail-label">位置</span><span className="detail-value">{fmt(selectedPart.location)}</span></div>
                       <div className="detail-item"><span className="detail-label">部门</span><span className="detail-value">{fmt(selectedPart.department)}</span></div>
                     </div>
@@ -699,26 +874,28 @@ const PartsManagement = () => {
                   {selectedPart.history && selectedPart.history.length > 0 && (
                     <section className="detail-section">
                       <h3 className="detail-section-title">历史记录</h3>
-                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                        <thead>
-                          <tr>
-                            <th style={{ padding: '8px', border: '1px solid #e2e8f0' }}>时间</th>
-                            <th style={{ padding: '8px', border: '1px solid #e2e8f0' }}>操作类型</th>
-                            <th style={{ padding: '8px', border: '1px solid #e2e8f0' }}>操作人</th>
-                            <th style={{ padding: '8px', border: '1px solid #e2e8f0' }}>备注</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {selectedPart.history.map((h) => (
-                            <tr key={h.id}>
-                              <td style={{ padding: '8px', border: '1px solid #e2e8f0' }}>{new Date(h.date).toLocaleString('zh-CN')}</td>
-                              <td style={{ padding: '8px', border: '1px solid #e2e8f0' }}>{h.action}</td>
-                              <td style={{ padding: '8px', border: '1px solid #e2e8f0' }}>{h.operator}</td>
-                              <td style={{ padding: '8px', border: '1px solid #e2e8f0' }}>{h.remark || '—'}</td>
+                      <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+                          <thead>
+                            <tr>
+                              <th style={{ padding: '8px', border: '1px solid #e2e8f0', width: '140px' }}>时间</th>
+                              <th style={{ padding: '8px', border: '1px solid #e2e8f0', width: '80px' }}>操作类型</th>
+                              <th style={{ padding: '8px', border: '1px solid #e2e8f0', width: '70px' }}>操作人</th>
+                              <th style={{ padding: '8px', border: '1px solid #e2e8f0' }}>备注</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody>
+                            {selectedPart.history.map((h) => (
+                              <tr key={h.id}>
+                                <td style={{ padding: '8px', border: '1px solid #e2e8f0' }}>{new Date(h.date).toLocaleString('zh-CN')}</td>
+                                <td style={{ padding: '8px', border: '1px solid #e2e8f0' }}>{h.action}</td>
+                                <td style={{ padding: '8px', border: '1px solid #e2e8f0' }}>{h.operator}</td>
+                                <td style={{ padding: '8px', border: '1px solid #e2e8f0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{h.remark || '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     </section>
                   )}
                 </>

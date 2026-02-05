@@ -51,12 +51,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 包含路由（批量导入单独挂到 POST /api/v1/import-servers，避免被 /servers/{server_id} 匹配导致 405）
+# 包含路由（批量导入单独挂到 POST /api/v1/import-xxx，避免被 /{id} 路由匹配导致 405）
 app.include_router(users.router, prefix="/api/v1")
 app.include_router(servers.import_router, prefix="/api/v1")
 app.include_router(servers.router, prefix="/api/v1")
 app.include_router(deployments.router, prefix="/api/v1")
 app.include_router(monitoring.router, prefix="/api/v1")
+app.include_router(assets.import_router, prefix="/api/v1")  # 配件批量导入
 app.include_router(assets.router, prefix="/api/v1")
 app.include_router(receipts.router, prefix="/api/v1")
 app.include_router(ad_config.router, prefix="/api/v1")

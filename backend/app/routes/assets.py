@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict
@@ -455,3 +455,287 @@ def get_asset_history(
     # 获取历史记录
     history_records = db.query(AssetHistoryModel).filter(AssetHistoryModel.asset_id == asset_id).all()
     return history_records
+
+
+@router.get("/by-server-sn/{server_sn}", response_model=List[Asset])
+def get_assets_by_server_sn(
+    server_sn: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """根据服务器SN获取关联的配件列表"""
+    assets = db.query(AssetModel).filter(
+        AssetModel.purchased_with_server_sn == server_sn
+    ).all()
+    return assets
+
+
+# ======================== 批量导入配件 ========================
+from openpyxl import load_workbook
+
+# 配件导入表头映射（与配件导入模板一致）
+IMPORT_HEADERS = {
+    "序列号(SN)": "sn",
+    "型号": "model",
+    "品牌": "brand",
+    "配件类型": "part_type",
+    "容量": "capacity",
+    "容量单位": "capacity_unit",
+    "频率": "frequency",
+    "频率单位": "frequency_unit",
+    "CPU核心数": "cpu_cores",
+    "接口类型": "interface_type",
+    "规格": "spec",
+    "使用人": "user",
+    "关联服务器SN": "purchased_with_server_sn",
+    "状态": "status",
+    "位置": "location",
+    "部门": "department",
+    "合同号": "contract_number",
+    "采购日期": "purchase_date",
+    "保修到期": "warranty_expiry",
+    "备注": "remark",
+}
+
+# 状态映射
+STATUS_IMPORT_MAPPING = {
+    "在库": "in_storage",
+    "使用中": "in_use",
+    "维修中": "maintenance",
+    "空闲": "idle",
+    "待报废": "pending_scrap",
+}
+
+# 独立的导入路由，挂到 /api/v1/import-assets，避免被 /assets/{asset_id} 抢匹配
+import_router = APIRouter(tags=["assets"])
+
+
+@import_router.post("/import-assets/")
+def import_assets_excel(
+    file: UploadFile = File(..., description="配件导入模板 Excel"),
+    receipt_id: int = Query(None, description="关联的入库单ID"),
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    批量导入配件：按配件导入模板表头解析，
+    导入后记录出现在「配件资产」列表中。
+    如果提供了 receipt_id，则将导入的配件关联到该入库单。
+    """
+    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="请上传 .xlsx 或 .xls 格式的 Excel 文件")
+    
+    try:
+        content = file.file.read()
+        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        ws = wb.active
+        if ws is None:
+            raise HTTPException(status_code=400, detail="Excel 无有效工作表")
+        
+        rows = list(ws.iter_rows(values_only=True))
+        if len(rows) < 2:
+            raise HTTPException(status_code=400, detail="Excel 无数据行（至少需要说明行+表头行）")
+        
+        # 第一行是说明，第二行是表头，从第三行开始是数据
+        header_row = [str(c).strip() if c is not None else "" for c in rows[1]]
+        col_map = {}
+        for idx, h in enumerate(header_row):
+            if h in IMPORT_HEADERS:
+                col_map[IMPORT_HEADERS[h]] = idx
+        
+        if "sn" not in col_map:
+            raise HTTPException(
+                status_code=400,
+                detail=f"缺少必填列【序列号(SN)】，请使用模板。当前表头：{header_row}"
+            )
+        
+        created = 0
+        skipped = []
+        errors = []
+        
+        for row_idx, row in enumerate(rows[2:], start=3):
+            if not row or all(c is None or str(c).strip() == "" for c in row):
+                continue
+            
+            vals = [row[i] if i < len(row) else None for i in range(max(col_map.values()) + 1)]
+            
+            def get(f: str):
+                if f not in col_map:
+                    return None
+                v = vals[col_map[f]]
+                if v is None:
+                    return None
+                if f == "cpu_cores":
+                    try:
+                        return int(float(v))
+                    except (TypeError, ValueError):
+                        return None
+                if f in ("purchase_date", "warranty_expiry") and v:
+                    try:
+                        if hasattr(v, "date"):
+                            return v.date() if hasattr(v, "date") else v
+                        return datetime.strptime(str(v).strip()[:10], "%Y-%m-%d").date() if str(v).strip() else None
+                    except Exception:
+                        return None
+                s = str(v).strip() if v else None
+                return s if s else None
+            
+            sn = get("sn")
+            if not sn:
+                errors.append({"row": row_idx, "reason": "序列号(SN)不能为空"})
+                continue
+            
+            # 检查SN是否已存在
+            if db.query(AssetModel).filter(AssetModel.sn == sn).first():
+                skipped.append({"row": row_idx, "sn": sn, "reason": "序列号已存在"})
+                continue
+            
+            try:
+                part_type = get("part_type")
+                status_raw = get("status")
+                status = STATUS_IMPORT_MAPPING.get(status_raw, "in_storage") if status_raw else "in_storage"
+                
+                asset_data = {
+                    "asset_code": _next_asset_code(db, part_type),
+                    "sn": sn,
+                    "model": get("model") or "-",  # 型号为空时设置默认值
+                    "brand": get("brand"),
+                    "part_type": part_type,
+                    "capacity": get("capacity"),
+                    "capacity_unit": get("capacity_unit"),
+                    "frequency": get("frequency"),
+                    "frequency_unit": get("frequency_unit"),
+                    "cpu_cores": get("cpu_cores"),
+                    "interface_type": get("interface_type"),
+                    "spec": get("spec"),
+                    "user": get("user"),
+                    "purchased_with_server_sn": get("purchased_with_server_sn"),
+                    "status": status,
+                    "location": get("location"),
+                    "department": get("department"),
+                    "contract_number": get("contract_number"),
+                    "purchase_date": get("purchase_date"),
+                    "warranty_expiry": get("warranty_expiry"),
+                    "remark": get("remark"),
+                }
+                
+                # 如果提供了入库单ID，关联到配件
+                if receipt_id:
+                    asset_data["receipt_id"] = receipt_id
+                
+                # 过滤掉None值
+                asset_data = {k: v for k, v in asset_data.items() if v is not None}
+                if "status" not in asset_data:
+                    asset_data["status"] = "in_storage"
+                
+                db_asset = AssetModel(**asset_data)
+                db.add(db_asset)
+                db.commit()
+                db.refresh(db_asset)
+                
+                # 添加创建记录到历史
+                now = datetime.now(pytz.timezone('Asia/Shanghai'))
+                history_record = AssetHistoryModel(
+                    asset_id=db_asset.id,
+                    date=now,
+                    action="批量导入",
+                    operator=current_user.username,
+                    remark="通过Excel批量导入"
+                )
+                db.add(history_record)
+                db.commit()
+                
+                created += 1
+            except Exception as e:
+                db.rollback()
+                errors.append({"row": row_idx, "reason": str(e)})
+        
+        wb.close()
+        
+        # 如果关联了入库单，更新入库单的资产数量
+        if receipt_id and created > 0:
+            from app.models.receipt import Receipt as ReceiptModel
+            receipt = db.query(ReceiptModel).filter(ReceiptModel.id == receipt_id).first()
+            if receipt:
+                # 重新计算关联到该入库单的配件数量
+                new_count = db.query(AssetModel).filter(
+                    AssetModel.receipt_id == receipt_id,
+                    AssetModel.deleted_at.is_(None)
+                ).count()
+                receipt.asset_count = new_count
+                db.commit()
+        
+        return {
+            "message": "批量导入完成",
+            "created": created,
+            "skipped": len(skipped),
+            "skipped_details": skipped[:20],
+            "errors": errors[:20]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
+
+
+@import_router.get("/assets-template/")
+def download_assets_template():
+    """下载配件导入模板"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "配件导入模板"
+    
+    # 第一行：说明（红色字体）
+    notice_text = "【说明】1.序列号(SN)必填，不可重复；2.配件类型可选：内存、硬盘、CPU、网卡、RAID卡、其他；3.状态可选：在库、使用中、空闲、待报废（默认为在库）；4.日期格式：YYYY-MM-DD；5.请删除示例数据后再导入"
+    notice_cell = ws.cell(row=1, column=1, value=notice_text)
+    notice_cell.font = Font(bold=True, color="FF0000")
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=20)
+    
+    # 定义表头 - 第二行
+    headers = [
+        "序列号(SN)", "配件类型", "品牌", "型号", "容量", "容量单位",
+        "频率", "频率单位", "CPU核心数", "接口类型", "规格",
+        "使用人", "关联服务器SN", "状态", "位置", "部门",
+        "合同号", "采购日期", "保修到期", "备注"
+    ]
+    
+    # 设置表头样式
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_alignment = Alignment(horizontal="center", vertical="center")
+    
+    for col_idx, header in enumerate(headers, 1):
+        cell = ws.cell(row=2, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
+        # 设置列宽
+        ws.column_dimensions[get_column_letter(col_idx)].width = 15
+    
+    # 添加示例数据 - 从第三行开始
+    example_data = [
+        ["MEM-001", "内存", "三星", "", "32", "GB", "3200", "Mhz", "", "DDR4", "",
+         "", "", "在库", "仓库", "IT部", "HT-2024-001", "2024-01-15", "2027-01-15", ""],
+        ["HDD-001", "硬盘", "西数", "", "2", "TB", "", "", "", "SAS", "3.5英寸",
+         "", "", "在库", "仓库", "IT部", "HT-2024-001", "2024-01-15", "2027-01-19", ""],
+        ["NET-001", "网卡", "inter", "82599ES", "", "", "10", "G", "", "PCIE", "",
+         "", "", "在库", "仓库", "IT部", "HT-2024-001", "2024-01-15", "2027-01-19", ""],
+        ["RAID-001", "RAID卡", "LSI", "3008", "", "", "12", "G", "", "PCIE", "",
+         "", "", "在库", "仓库", "IT部", "HT-2024-001", "2024-01-15", "2027-01-19", ""],
+    ]
+    
+    for row_idx, row_data in enumerate(example_data, 3):
+        for col_idx, value in enumerate(row_data, 1):
+            ws.cell(row=row_idx, column=col_idx, value=value)
+    
+    # 保存到内存
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    
+    filename = quote("配件导入模板.xlsx")
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
+    )

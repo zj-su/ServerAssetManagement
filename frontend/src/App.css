@@ -205,12 +205,12 @@ tr:nth-child(even) {
   color: #155724;
 }
 
-.status.offline, .status.idle, .status.in_storage {
+.status.offline, .status.idle {
   background-color: #f8d7da;
   color: #721c24;
 }
 
-.status.maintenance {
+.status.maintenance, .status.in_storage {
   background-color: #fff3cd;
   color: #856404;
 }
@@ -966,6 +966,7 @@ button {
 
 .history-table {
   width: 100%;
+  table-layout: fixed;
 }
 
 .history-table th {
@@ -973,11 +974,27 @@ button {
   font-weight: 600;
 }
 
+.history-table th:nth-child(1),
+.history-table td:nth-child(1) {
+  width: 140px;
+}
+
+.history-table th:nth-child(2),
+.history-table td:nth-child(2) {
+  width: 90px;
+}
+
+.history-table th:nth-child(3),
+.history-table td:nth-child(3) {
+  width: 80px;
+}
+
 .history-table .history-remark {
-  max-width: 300px;
-  word-break: break-all;
   font-size: 12px;
   color: #666;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
 }
 
 /* 响应式设计 */
