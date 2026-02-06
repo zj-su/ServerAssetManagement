@@ -256,6 +256,24 @@ export const adConfigAPI = {
   testConfig: (data) => api.post('/ad-config/test', data),
 };
 
+// 角色管理相关API
+export const roleAPI = {
+  // 获取角色列表
+  getRoles: () => api.get('/roles/'),
+  
+  // 获取角色详情
+  getRole: (id) => api.get(`/roles/${id}`),
+  
+  // 创建角色
+  createRole: (data) => api.post('/roles/', data),
+  
+  // 更新角色
+  updateRole: (id, data) => api.put(`/roles/${id}`, data),
+  
+  // 删除角色
+  deleteRole: (id) => api.delete(`/roles/${id}`),
+};
+
 export default {
   serverAPI,
   authAPI,
@@ -263,4 +281,5 @@ export default {
   receiptAPI,
   userAPI,
   adConfigAPI,
+  roleAPI,
 };

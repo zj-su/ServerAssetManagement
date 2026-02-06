@@ -339,29 +339,16 @@ const AssetScrapManagement = ({ initialTab = 'pending' }) => {
   const currentList = getMergedList();
   const tableOptions = activeTab === 'pending' ? { isPending: true } : activeTab === 'recycle' ? { isRecycle: true } : {};
 
+  // 根据当前 Tab 显示对应的标题
+  const getTabTitle = () => {
+    if (activeTab === 'pending') return '资产待报废';
+    if (activeTab === 'scrapped') return '报废资产';
+    return '删除回收站';
+  };
+
   return (
     <div className="asset-scrap-management" style={{ padding: '20px' }}>
-      <h2>资产报废管理</h2>
-      <div className="tabs" style={{ marginBottom: '16px', display: 'flex', gap: '8px' }}>
-        <button
-          className={activeTab === 'pending' ? 'tab active' : 'tab'}
-          onClick={() => setActiveTab('pending')}
-        >
-          资产待报废
-        </button>
-        <button
-          className={activeTab === 'scrapped' ? 'tab active' : 'tab'}
-          onClick={() => setActiveTab('scrapped')}
-        >
-          报废资产
-        </button>
-        <button
-          className={activeTab === 'recycle' ? 'tab active' : 'tab'}
-          onClick={() => setActiveTab('recycle')}
-        >
-          删除回收站
-        </button>
-      </div>
+      <h2>{getTabTitle()}</h2>
       <div className="section-header" style={{ marginBottom: '12px' }}>
         <button className="btn-secondary" onClick={onRefresh}>刷新</button>
       </div>

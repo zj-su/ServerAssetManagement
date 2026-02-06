@@ -6,6 +6,7 @@ import PartReceiptManagement from './components/PartReceiptManagement';
 import ServerReceiptManagement from './components/ServerReceiptManagement';
 import LoginForm from './components/LoginForm';
 import UserManagement from './components/UserManagement';
+import RoleManagement from './components/RoleManagement';
 import ADConfigManagement from './components/ADConfigManagement';
 import { serverAPI, assetAPI } from './services/api';
 import './App.css';
@@ -832,12 +833,7 @@ function App() {
 
           {/* 用户管理：用户 / 角色管理 / LDAP配置 */}
           {activeMenu === 'users' && <UserManagement />}
-          {activeMenu === 'roles' && (
-            <section className="placeholder">
-              <h2>角色管理</h2>
-              <p>此功能正在开发中...</p>
-            </section>
-          )}
+          {activeMenu === 'roles' && <RoleManagement />}
           {activeMenu === 'ldap' && <ADConfigManagement />}
         </main>
       </div>
