@@ -88,8 +88,8 @@ function ServerDetail({ serverId, onClose }) {
 
   if (loading) {
     return (
-      <div className="modal">
-        <div className="modal-content server-detail-modal">
+      <div className="modal" onClick={onClose}>
+        <div className="modal-content server-detail-modal" onClick={(e) => e.stopPropagation()}>
           <div className="modal-header server-detail-header">
             <h2>服务器详情</h2>
             <button type="button" className="btn-close" onClick={onClose} aria-label="关闭">×</button>
@@ -104,8 +104,8 @@ function ServerDetail({ serverId, onClose }) {
 
   if (error) {
     return (
-      <div className="modal">
-        <div className="modal-content server-detail-modal">
+      <div className="modal" onClick={onClose}>
+        <div className="modal-content server-detail-modal" onClick={(e) => e.stopPropagation()}>
           <div className="modal-header server-detail-header">
             <h2>服务器详情</h2>
             <button type="button" className="btn-close" onClick={onClose} aria-label="关闭">×</button>
@@ -121,8 +121,8 @@ function ServerDetail({ serverId, onClose }) {
 
   if (!server || (server.id == null && server.serial_number == null)) {
     return (
-      <div className="modal">
-        <div className="modal-content server-detail-modal">
+      <div className="modal" onClick={onClose}>
+        <div className="modal-content server-detail-modal" onClick={(e) => e.stopPropagation()}>
           <div className="modal-header server-detail-header">
             <h2>服务器详情</h2>
             <button type="button" className="btn-close" onClick={onClose} aria-label="关闭">×</button>
@@ -139,8 +139,8 @@ function ServerDetail({ serverId, onClose }) {
   const title = server.asset_code || (fmt(server.serial_number) !== '—' ? server.serial_number : server.ip_address || `#${server.id}`);
 
   return (
-    <div className="modal">
-      <div className="modal-content server-detail-modal oa-detail">
+    <div className="modal" onClick={onClose}>
+      <div className="modal-content server-detail-modal oa-detail" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header server-detail-header">
           <div className="server-detail-title-wrap">
             <h2>服务器资产详情</h2>

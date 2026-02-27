@@ -1,16 +1,39 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func, false
 from typing import List, Optional
 from app.core.database import get_db
 from app.models.receipt import Receipt as ReceiptModel, ReceiptItem as ReceiptItemModel, ReceiptType, ReceiptStatus
 from app.models.asset import Asset as AssetModel
 from app.schemas.receipt import Receipt, ReceiptCreate, ReceiptDetail, ReceiptItem as ReceiptItemSchema
-from app.utils.security import get_current_username, get_current_user
+from app.utils.security import get_current_user, require_admin, require_permission
 from datetime import datetime, timedelta
 import pytz
 
 # 使用带尾部斜杠的 prefix，避免 307 重定向导致前端请求丢失 Authorization 头
 router = APIRouter(prefix="/receipts", tags=["receipts"])
+
+
+def _is_admin_user(current_user) -> bool:
+    return getattr(current_user, "role", "") == "admin"
+
+
+def _owner_identities(current_user) -> List[str]:
+    values = [
+        getattr(current_user, "username", None),
+        getattr(current_user, "display_name", None),
+    ]
+    seen = set()
+    result = []
+    for v in values:
+        if not isinstance(v, str):
+            continue
+        s = v.strip().lower()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        result.append(s)
+    return result
 
 def generate_receipt_number(receipt_type: ReceiptType, db: Session) -> str:
     """生成入库单号：RK-SERVER-20251216-000001 或 RK-PART-20251216-000001"""
@@ -38,7 +61,7 @@ def generate_receipt_number(receipt_type: ReceiptType, db: Session) -> str:
 def create_receipt(
     receipt: ReceiptCreate, 
     db: Session = Depends(get_db),
-    current_username: str = Depends(get_current_username)
+    current_user = Depends(require_permission("receipt:write"))
 ):
     """创建入库单"""
     receipt_number = generate_receipt_number(receipt.receipt_type, db)
@@ -50,7 +73,7 @@ def create_receipt(
         receipt_number=receipt_number,
         receipt_type=receipt.receipt_type,
         status=ReceiptStatus.DRAFT.value,
-        operator=current_username,
+        operator=current_user.username,
         purchaser=receipt.purchaser,
         company=receipt.company,
         department=receipt.department,
@@ -70,20 +93,54 @@ def get_receipts(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("receipt:read"))
 ):
     """获取入库单列表"""
     query = db.query(ReceiptModel)
     if receipt_type:
         query = query.filter(ReceiptModel.receipt_type == receipt_type)
     receipts = query.order_by(ReceiptModel.created_at.desc()).offset(skip).limit(limit).all()
-    return receipts
+
+    # 普通用户仅可见“自己名下资产”相关入库单；管理员可见全部
+    if _is_admin_user(current_user):
+        return receipts
+
+    owners = _owner_identities(current_user)
+    if not owners:
+        return []
+
+    from app.models.server import Server as ServerModel
+    filtered = []
+    for r in receipts:
+        if r.receipt_type == ReceiptType.SERVER.value or r.receipt_type == "server":
+            owner_expr = func.lower(func.trim(func.coalesce(ServerModel.user_person, "")))
+            owned = db.query(ServerModel.id).filter(
+                ServerModel.receipt_id == r.id,
+                owner_expr.in_(owners),
+            ).first() is not None
+        else:
+            owner_expr = func.lower(func.trim(func.coalesce(AssetModel.user, "")))
+            # 兼容两种关联方式：receipt_items 与 assets.receipt_id
+            owned_by_item = db.query(ReceiptItemModel.id).join(
+                AssetModel, ReceiptItemModel.asset_id == AssetModel.id
+            ).filter(
+                ReceiptItemModel.receipt_id == r.id,
+                owner_expr.in_(owners),
+            ).first() is not None
+            owned_by_direct = db.query(AssetModel.id).filter(
+                AssetModel.receipt_id == r.id,
+                owner_expr.in_(owners),
+            ).first() is not None
+            owned = owned_by_item or owned_by_direct
+        if owned:
+            filtered.append(r)
+    return filtered
 
 @router.get("/{receipt_id}", response_model=ReceiptDetail)
 def get_receipt(
     receipt_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("receipt:read"))
 ):
     """获取入库单详情"""
     from app.models.server import Server as ServerModel
@@ -95,6 +152,9 @@ def get_receipt(
     if receipt is None:
         raise HTTPException(status_code=404, detail="入库单未找到")
     
+    owners = _owner_identities(current_user)
+    restrict_owner = not _is_admin_user(current_user)
+
     # 构建包含资产详细信息的明细列表
     items_detail = []
     
@@ -102,6 +162,10 @@ def get_receipt(
         # 服务器入库单：从 servers 表查询关联的服务器
         servers = db.query(ServerModel).filter(ServerModel.receipt_id == receipt_id).all()
         for server in servers:
+            if restrict_owner:
+                owner = (server.user_person or "").strip().lower()
+                if owner not in owners:
+                    continue
             items_detail.append({
                 "id": server.id,
                 "receipt_id": receipt_id,
@@ -123,6 +187,12 @@ def get_receipt(
         # 配件入库单：从 receipt_items 表查询（单个添加方式）
         for item in receipt.items:
             asset = item.asset
+            if not asset:
+                continue
+            if restrict_owner:
+                owner = (asset.user or "").strip().lower()
+                if owner not in owners:
+                    continue
             items_detail.append({
                 "id": item.id,
                 "receipt_id": item.receipt_id,
@@ -150,6 +220,10 @@ def get_receipt(
         # 避免重复：检查 asset_id 是否已经在 items_detail 中
         existing_asset_ids = {item["asset_id"] for item in items_detail}
         for asset in directly_linked_assets:
+            if restrict_owner:
+                owner = (asset.user or "").strip().lower()
+                if owner not in owners:
+                    continue
             if asset.id not in existing_asset_ids:
                 items_detail.append({
                     "id": asset.id,  # 使用 asset.id 作为 item id
@@ -168,6 +242,10 @@ def get_receipt(
                     "item_type": "asset",  # 标识为配件
                 })
     
+    # 普通用户请求他人入库单时，按“不可见”处理
+    if restrict_owner and not items_detail:
+        raise HTTPException(status_code=404, detail="入库单未找到")
+
     # 重新计算实际的资产数量
     actual_count = len(items_detail)
     
@@ -203,7 +281,7 @@ def get_receipt(
 def submit_receipt(
     receipt_id: int,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("receipt:write"))
 ):
     """提交入库（业界做法：草稿 → 已入库，锁定单据）"""
     from app.models.server import Server as ServerModel
@@ -252,7 +330,7 @@ def add_receipt_item(
     receipt_id: int, 
     asset_id: int = Query(...), 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("receipt:write"))
 ):
     """向入库单添加资产（仅草稿状态可添加）"""
     receipt = db.query(ReceiptModel).filter(ReceiptModel.id == receipt_id).first()
@@ -295,7 +373,7 @@ def add_receipt_item(
 def delete_receipt(
     receipt_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("receipt:delete"))
 ):
     """
     删除入库单：
@@ -374,7 +452,7 @@ def revoke_receipt_item(
     receipt_id: int, 
     item_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("receipt:delete"))
 ):
     """
     移除/撤销入库单中的资产：
@@ -430,10 +508,6 @@ def revoke_receipt_item(
         db.commit()
         db.refresh(receipt)
         return {"message": "已从入库单移除该资产", "receipt_deleted": False}
-    
-    # 已入库状态：仅两天内可撤销，且删除资产（需管理员）
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="撤销已入库资产需管理员权限")
     
     now = datetime.now(pytz.timezone('Asia/Shanghai'))
     two_days_ago = now - timedelta(days=2)

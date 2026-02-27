@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import func, false
 from typing import List, Dict, Any
 from app.core.database import get_db
 from app.models.server import Server as ServerModel, ServerHistory as ServerHistoryModel
 from app.models.asset import Asset as AssetModel
 from app.schemas.server import Server, ServerCreate, ServerUpdate
-from app.utils.security import get_current_user, require_admin
+from app.utils.security import get_current_user, require_admin, require_permission
 import logging
 import io
 from openpyxl import load_workbook
@@ -16,6 +17,39 @@ logger = logging.getLogger(__name__)
 # 服务器资产编码前缀与格式：SY-SR-0001
 ASSET_CODE_PREFIX = "SY-SR-"
 ASSET_CODE_DIGITS = 4
+
+
+def _is_admin_user(current_user) -> bool:
+    return getattr(current_user, "role", "") == "admin"
+
+
+def _owner_identities(current_user) -> List[str]:
+    values = [
+        getattr(current_user, "username", None),
+        getattr(current_user, "display_name", None),
+    ]
+    seen = set()
+    result = []
+    for v in values:
+        if not isinstance(v, str):
+            continue
+        s = v.strip().lower()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        result.append(s)
+    return result
+
+
+def _apply_server_owner_scope(query, current_user):
+    # 仅普通用户限制为“使用人=自己”，管理员维持全量可见
+    if _is_admin_user(current_user):
+        return query
+    owners = _owner_identities(current_user)
+    if not owners:
+        return query.filter(false())
+    owner_expr = func.lower(func.trim(func.coalesce(ServerModel.user_person, "")))
+    return query.filter(owner_expr.in_(owners))
 
 
 def _next_asset_code(db: Session) -> str:
@@ -75,7 +109,7 @@ def import_servers_excel(
     file: UploadFile = File(..., description="服务器导入模板 Excel"),
     receipt_id: int = Query(None, description="关联的入库单ID"),
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:write"))
 ):
     """
     批量导入服务器：按服务器导入模板表头解析。
@@ -287,13 +321,15 @@ def read_servers(
     skip: int = 0, 
     limit: int = 100, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:read"))
 ):
     try:
         # 默认排除待报废、已报废和已删除的服务器
-        servers = db.query(ServerModel).filter(
+        q = db.query(ServerModel).filter(
             ~ServerModel.status.in_(['pending_scrap', 'scrapped', 'deleted'])
-        ).offset(skip).limit(limit).all()
+        )
+        q = _apply_server_owner_scope(q, current_user)
+        servers = q.offset(skip).limit(limit).all()
         return servers
     except Exception as e:
         logger.error(f"Error fetching servers: {e}")
@@ -305,7 +341,7 @@ def search_servers(
     q: str = "",
     limit: int = 20,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:read"))
 ):
     """搜索服务器（按SN、主机名、IP、资产编码模糊匹配）"""
     try:
@@ -313,7 +349,7 @@ def search_servers(
             return []
         
         keyword = f"%{q.strip()}%"
-        servers = db.query(ServerModel).filter(
+        q = db.query(ServerModel).filter(
             ~ServerModel.status.in_(['pending_scrap', 'scrapped', 'deleted']),
             (
                 ServerModel.serial_number.ilike(keyword) |
@@ -321,7 +357,9 @@ def search_servers(
                 ServerModel.ip_address.ilike(keyword) |
                 ServerModel.asset_code.ilike(keyword)
             )
-        ).limit(limit).all()
+        )
+        q = _apply_server_owner_scope(q, current_user)
+        servers = q.limit(limit).all()
         return servers
     except Exception as e:
         logger.error(f"Error searching servers: {e}")
@@ -331,7 +369,7 @@ def search_servers(
 def create_server(
     server: ServerCreate, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:write"))
 ):
     from app.models.receipt import Receipt as ReceiptModel
     
@@ -396,10 +434,12 @@ def create_server(
 def read_server(
     server_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:read"))
 ):
     try:
-        db_server = db.query(ServerModel).filter(ServerModel.id == server_id).first()
+        q = db.query(ServerModel).filter(ServerModel.id == server_id)
+        q = _apply_server_owner_scope(q, current_user)
+        db_server = q.first()
         if db_server is None:
             raise HTTPException(status_code=404, detail="服务器未找到")
         return db_server
@@ -456,7 +496,7 @@ def update_server(
     server_id: int, 
     server: ServerUpdate, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:write"))
 ):
     try:
         db_server = db.query(ServerModel).filter(ServerModel.id == server_id).first()
@@ -527,7 +567,7 @@ def update_server(
 def delete_server_to_recycle(
     server_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:delete"))
 ):
     """将服务器移至回收站（软删除）"""
     from datetime import datetime
@@ -563,14 +603,16 @@ def get_deleted_servers(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:read"))
 ):
     """获取已删除的服务器列表（回收站）"""
     try:
-        servers = db.query(ServerModel).filter(
+        q = db.query(ServerModel).filter(
             ServerModel.status == "deleted",
             ServerModel.deleted_at.isnot(None)
-        ).offset(skip).limit(limit).all()
+        )
+        q = _apply_server_owner_scope(q, current_user)
+        servers = q.offset(skip).limit(limit).all()
         return servers
     except Exception as e:
         logger.error(f"Error fetching deleted servers: {e}")
@@ -581,7 +623,7 @@ def get_deleted_servers(
 def restore_server(
     server_id: int,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:delete"))
 ):
     """从回收站恢复服务器"""
     try:
@@ -615,7 +657,7 @@ def restore_server(
 def permanently_delete_server(
     server_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(require_admin)
+    current_user = Depends(require_permission("server:delete"))
 ):
     """永久删除服务器（需要管理员权限）"""
     try:
@@ -643,7 +685,7 @@ def permanently_delete_server(
 def power_on_server(
     server_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:write"))
 ):
     try:
         db_server = db.query(ServerModel).filter(ServerModel.id == server_id).first()
@@ -671,7 +713,7 @@ def power_on_server(
 def power_off_server(
     server_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:write"))
 ):
     try:
         db_server = db.query(ServerModel).filter(ServerModel.id == server_id).first()
@@ -699,7 +741,7 @@ def power_off_server(
 def reboot_server(
     server_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:write"))
 ):
     try:
         db_server = db.query(ServerModel).filter(ServerModel.id == server_id).first()
@@ -729,10 +771,12 @@ def reboot_server(
 def get_server_history(
     server_id: int,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("server:read"))
 ):
     """获取服务器的操作历史记录"""
-    db_server = db.query(ServerModel).filter(ServerModel.id == server_id).first()
+    q = db.query(ServerModel).filter(ServerModel.id == server_id)
+    q = _apply_server_owner_scope(q, current_user)
+    db_server = q.first()
     if db_server is None:
         raise HTTPException(status_code=404, detail="服务器未找到")
     
@@ -777,7 +821,7 @@ def _add_server_history(db: Session, server_id: int, action: str, operator: str,
 def scrap_server(
     server_id: int,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("scrap:write"))
 ):
     """将服务器标记为待报废"""
     try:
@@ -808,7 +852,7 @@ def scrap_server(
 def confirm_scrap_server(
     server_id: int,
     db: Session = Depends(get_db),
-    current_user = Depends(require_admin)
+    current_user = Depends(require_permission("scrap:write"))
 ):
     """确认报废服务器（需要管理员权限）"""
     try:
@@ -840,10 +884,12 @@ def confirm_scrap_server(
 @router.get("/scrap/pending")
 def get_pending_scrap_servers(
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("scrap:read"))
 ):
     """获取待报废服务器列表"""
-    servers = db.query(ServerModel).filter(ServerModel.status == "pending_scrap").all()
+    q = db.query(ServerModel).filter(ServerModel.status == "pending_scrap")
+    q = _apply_server_owner_scope(q, current_user)
+    servers = q.all()
     return servers
 
 
@@ -851,8 +897,10 @@ def get_pending_scrap_servers(
 @router.get("/scrap/scrapped")
 def get_scrapped_servers(
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_permission("scrap:read"))
 ):
     """获取已报废服务器列表"""
-    servers = db.query(ServerModel).filter(ServerModel.status == "scrapped").all()
+    q = db.query(ServerModel).filter(ServerModel.status == "scrapped")
+    q = _apply_server_owner_scope(q, current_user)
+    servers = q.all()
     return servers

@@ -1,7 +1,7 @@
 import time
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import servers, users, deployments, monitoring, assets, receipts, ad_config
+from app.routes import servers, users, deployments, monitoring, assets, receipts, ad_config, roles, locations
 from app.core.database import engine, Base
 from app.core.logging_config import setup_logging, get_logger
 
@@ -61,6 +61,8 @@ app.include_router(assets.import_router, prefix="/api/v1")  # 配件批量导入
 app.include_router(assets.router, prefix="/api/v1")
 app.include_router(receipts.router, prefix="/api/v1")
 app.include_router(ad_config.router, prefix="/api/v1")
+app.include_router(roles.router, prefix="/api/v1")
+app.include_router(locations.router, prefix="/api/v1")
 
 @app.get("/")
 def read_root():

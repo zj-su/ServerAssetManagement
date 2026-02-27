@@ -4,7 +4,8 @@ import { assetAPI, serverAPI } from '../services/api';
 /**
  * 资产报废管理 - 待报废资产、报废资产、删除回收站（支持 initialTab 与左侧菜单联动）
  */
-const AssetScrapManagement = ({ initialTab = 'pending' }) => {
+const AssetScrapManagement = ({ initialTab = 'pending', permissions = [] }) => {
+  const hasPermission = (perm) => (permissions || []).includes('*') || (permissions || []).includes(perm);
   const [activeTab, setActiveTab] = useState(initialTab); // pending | scrapped | recycle
   const [pendingAssets, setPendingAssets] = useState([]);
   const [scrappedAssets, setScrappedAssets] = useState([]);
@@ -279,26 +280,42 @@ const AssetScrapManagement = ({ initialTab = 'pending' }) => {
                   <button className="btn-info" onClick={() => viewDetail(item.id, item._type)}>详情</button>
                   {isPending && item._type === 'asset' && (
                     <>
-                      <button className="btn-success" onClick={() => confirmScrap(item.id)}>确认报废</button>
-                      <button className="btn-danger" onClick={() => deleteToRecycle(item.id)}>移至回收站</button>
+                      {hasPermission('scrap:write') && (
+                        <button className="btn-success" onClick={() => confirmScrap(item.id)}>确认报废</button>
+                      )}
+                      {hasPermission('part:delete') && (
+                        <button className="btn-danger" onClick={() => deleteToRecycle(item.id)}>移至回收站</button>
+                      )}
                     </>
                   )}
                   {isPending && item._type === 'server' && (
                     <>
-                      <button className="btn-success" onClick={() => confirmScrapServer(item.id)}>确认报废</button>
-                      <button className="btn-danger" onClick={() => deleteServerToRecycle(item.id)}>移至回收站</button>
+                      {hasPermission('scrap:write') && (
+                        <button className="btn-success" onClick={() => confirmScrapServer(item.id)}>确认报废</button>
+                      )}
+                      {hasPermission('server:delete') && (
+                        <button className="btn-danger" onClick={() => deleteServerToRecycle(item.id)}>移至回收站</button>
+                      )}
                     </>
                   )}
                   {isRecycle && item._type === 'asset' && (
                     <>
-                      <button className="btn-success" onClick={() => restoreFromRecycle(item.id)}>恢复</button>
-                      <button className="btn-danger" onClick={() => permanentlyDeleteAsset(item.id)}>永久删除</button>
+                      {hasPermission('part:delete') && (
+                        <>
+                          <button className="btn-success" onClick={() => restoreFromRecycle(item.id)}>恢复</button>
+                          <button className="btn-danger" onClick={() => permanentlyDeleteAsset(item.id)}>永久删除</button>
+                        </>
+                      )}
                     </>
                   )}
                   {isRecycle && item._type === 'server' && (
                     <>
-                      <button className="btn-success" onClick={() => restoreServerFromRecycle(item.id)}>恢复</button>
-                      <button className="btn-danger" onClick={() => permanentlyDeleteServer(item.id)}>永久删除</button>
+                      {hasPermission('server:delete') && (
+                        <>
+                          <button className="btn-success" onClick={() => restoreServerFromRecycle(item.id)}>恢复</button>
+                          <button className="btn-danger" onClick={() => permanentlyDeleteServer(item.id)}>永久删除</button>
+                        </>
+                      )}
                     </>
                   )}
                 </td>

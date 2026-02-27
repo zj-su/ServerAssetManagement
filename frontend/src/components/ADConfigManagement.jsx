@@ -123,29 +123,36 @@ const ADConfigManagement = () => {
   }, []);
 
   return (
-    <div style={{ padding: '20px' }}>
-      <h2>AD域配置管理</h2>
-      
+    <div className="ldap-page">
+      <div className="ldap-header">
+        <h2>LDAP 配置管理</h2>
+        <p>集中维护 AD/LDAP 连接参数、认证策略与连通性测试。</p>
+      </div>
+
       {loading ? (
         <p>加载中...</p>
       ) : (
-        <div>
-          {/* 配置表单 */}
-          <div style={{ marginBottom: '30px' }}>
-            <h3>AD域配置</h3>
-            <form>
-              <div className="form-group">
-                <label>
-                  <input
-                    type="checkbox"
-                    name="enabled"
-                    checked={config.enabled}
-                    onChange={handleInputChange}
-                  />
-                  启用AD域认证
+        <div className="ldap-layout">
+          <section className="ldap-card">
+            <div className="ldap-card-header">
+              <h3>基础连接配置</h3>
+            </div>
+            <form className="ldap-form-grid">
+              <div className="ldap-switch-row">
+                <label className="ldap-switch-label">
+                  <input type="checkbox" name="enabled" checked={config.enabled} onChange={handleInputChange} />
+                  <span>启用 AD 域认证</span>
+                </label>
+                <label className="ldap-switch-label">
+                  <input type="checkbox" name="use_ssl" checked={config.use_ssl} onChange={handleInputChange} />
+                  <span>启用 SSL</span>
+                </label>
+                <label className="ldap-switch-label">
+                  <input type="checkbox" name="use_tls" checked={config.use_tls} onChange={handleInputChange} />
+                  <span>启用 TLS（推荐）</span>
                 </label>
               </div>
-              
+
               <div className="form-group">
                 <label>AD域服务器地址:</label>
                 <input
@@ -156,7 +163,7 @@ const ADConfigManagement = () => {
                   placeholder="ldap://ad-server:389"
                 />
               </div>
-              
+
               <div className="form-group">
                 <label>域名:</label>
                 <input
@@ -167,7 +174,7 @@ const ADConfigManagement = () => {
                   placeholder="yourdomain.com"
                 />
               </div>
-              
+
               <div className="form-group">
                 <label>基础DN:</label>
                 <input
@@ -178,7 +185,7 @@ const ADConfigManagement = () => {
                   placeholder="DC=yourdomain,DC=com"
                 />
               </div>
-              
+
               <div className="form-group">
                 <label>服务账号:</label>
                 <input
@@ -189,7 +196,7 @@ const ADConfigManagement = () => {
                   placeholder="CN=ServiceAccount,OU=ServiceAccounts,DC=yourdomain,DC=com"
                 />
               </div>
-              
+
               <div className="form-group">
                 <label>服务账号密码:</label>
                 <input
@@ -200,7 +207,7 @@ const ADConfigManagement = () => {
                   placeholder="留空表示不修改"
                 />
               </div>
-              
+
               <div className="form-group">
                 <label>用户搜索基础DN（可选）:</label>
                 <input
@@ -211,7 +218,7 @@ const ADConfigManagement = () => {
                   placeholder="留空则使用基础DN"
                 />
               </div>
-              
+
               <div className="form-group">
                 <label>组搜索基础DN（可选）:</label>
                 <input
@@ -222,32 +229,8 @@ const ADConfigManagement = () => {
                   placeholder="留空则使用基础DN"
                 />
               </div>
-              
-              <div className="form-group">
-                <label>
-                  <input
-                    type="checkbox"
-                    name="use_ssl"
-                    checked={config.use_ssl}
-                    onChange={handleInputChange}
-                  />
-                  使用SSL
-                </label>
-              </div>
-              
-              <div className="form-group">
-                <label>
-                  <input
-                    type="checkbox"
-                    name="use_tls"
-                    checked={config.use_tls}
-                    onChange={handleInputChange}
-                  />
-                  使用TLS（推荐）
-                </label>
-              </div>
-              
-              <div className="form-group">
+
+              <div className="form-group ldap-span-2">
                 <label>配置说明:</label>
                 <textarea
                   name="description"
@@ -257,72 +240,56 @@ const ADConfigManagement = () => {
                   placeholder="可选，用于记录配置说明"
                 />
               </div>
-              
-              <div style={{ marginTop: '20px', display: 'flex', gap: '10px' }}>
-                <button 
-                  type="button"
-                  onClick={saveConfig}
-                  disabled={saving}
-                  className="btn-primary"
-                >
+
+              <div className="ldap-actions ldap-span-2">
+                <button type="button" onClick={saveConfig} disabled={saving} className="btn-primary">
                   {saving ? '保存中...' : '保存配置'}
                 </button>
-                <button 
-                  type="button"
-                  onClick={deleteConfig}
-                  className="btn-secondary"
-                >
+                <button type="button" onClick={deleteConfig} className="btn-secondary">
                   删除配置
                 </button>
               </div>
             </form>
-          </div>
+          </section>
 
-          {/* 连接测试 */}
-          <div style={{ marginTop: '30px', padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
-            <h3>连接测试</h3>
-            <p style={{ color: '#666', fontSize: '14px', marginBottom: '15px' }}>
+          <section className="ldap-card ldap-test-card">
+            <div className="ldap-card-header">
+              <h3>连接测试</h3>
+            </div>
+            <p className="ldap-test-desc">
               输入AD域用户名和密码测试连接和认证
             </p>
-            
-            <div className="form-group">
-              <label>测试用户名:</label>
-              <input
-                type="text"
-                value={testUsername}
-                onChange={(e) => setTestUsername(e.target.value)}
-                placeholder="username 或 username@domain.com"
-              />
+
+            <div className="ldap-test-grid">
+              <div className="form-group">
+                <label>测试用户名:</label>
+                <input
+                  type="text"
+                  value={testUsername}
+                  onChange={(e) => setTestUsername(e.target.value)}
+                  placeholder="username 或 username@domain.com"
+                />
+              </div>
+
+              <div className="form-group">
+                <label>测试密码:</label>
+                <input
+                  type="password"
+                  value={testPassword}
+                  onChange={(e) => setTestPassword(e.target.value)}
+                  placeholder="输入密码"
+                />
+              </div>
             </div>
-            
-            <div className="form-group">
-              <label>测试密码:</label>
-              <input
-                type="password"
-                value={testPassword}
-                onChange={(e) => setTestPassword(e.target.value)}
-                placeholder="输入密码"
-              />
-            </div>
-            
-            <button 
-              onClick={testConnection}
-              disabled={testing || !config.enabled}
-              className="btn-primary"
-            >
+
+            <button onClick={testConnection} disabled={testing || !config.enabled} className="btn-primary">
               {testing ? '测试中...' : '测试连接'}
             </button>
-            
+
             {testResult && (
-              <div style={{ 
-                marginTop: '15px', 
-                padding: '15px', 
-                backgroundColor: testResult.success ? '#d4edda' : '#f8d7da',
-                border: `1px solid ${testResult.success ? '#c3e6cb' : '#f5c6cb'}`,
-                borderRadius: '4px'
-              }}>
+              <div className={`ldap-test-result ${testResult.success ? 'ok' : 'fail'}`}>
                 <strong>{testResult.success ? '✓ 测试成功' : '✗ 测试失败'}</strong>
-                <p style={{ margin: '10px 0 0 0' }}>{testResult.message}</p>
+                <p>{testResult.message}</p>
                 {testResult.user_info && (
                   <div style={{ marginTop: '10px', fontSize: '14px' }}>
                     <p><strong>用户信息:</strong></p>
@@ -335,7 +302,7 @@ const ADConfigManagement = () => {
                 )}
               </div>
             )}
-          </div>
+          </section>
         </div>
       )}
     </div>

@@ -4,7 +4,7 @@ from datetime import datetime
 from app.core.database import get_db
 from app.models.ad_config import ADConfig as ADConfigModel
 from app.schemas.ad_config import ADConfig, ADConfigCreate, ADConfigUpdate, ADConfigTest, ADConfigTestResponse
-from app.utils.security import require_admin
+from app.utils.security import require_permission
 
 router = APIRouter(prefix="/ad-config", tags=["ad-config"])
 
@@ -54,7 +54,7 @@ def get_ad_config(db: Session = Depends(get_db)):
 def create_or_update_ad_config(
     config: ADConfigCreate,
     db: Session = Depends(get_db),
-    current_user = Depends(require_admin)
+    current_user = Depends(require_permission("role:write"))
 ):
     """创建或更新AD域配置（单例模式，只保留一条配置）"""
     # 查找现有配置
@@ -63,6 +63,9 @@ def create_or_update_ad_config(
     if existing_config:
         # 更新现有配置
         for key, value in config.dict(exclude_unset=True).items():
+            # 前端密码字段留空表示“不修改”，避免把已保存的绑定密码覆盖成空串
+            if key == "bind_password" and (value is None or (isinstance(value, str) and value.strip() == "")):
+                continue
             setattr(existing_config, key, value)
         db.commit()
         db.refresh(existing_config)
@@ -78,7 +81,7 @@ def create_or_update_ad_config(
 @router.delete("/")
 def delete_ad_config(
     db: Session = Depends(get_db),
-    current_user = Depends(require_admin)
+    current_user = Depends(require_permission("role:write"))
 ):
     """删除AD域配置"""
     config = db.query(ADConfigModel).first()
@@ -132,9 +135,10 @@ def test_ad_config(
                 user_info=user_info
             )
         else:
+            detail = ad_auth.last_error or "AD域认证失败，请检查用户名和密码"
             return ADConfigTestResponse(
                 success=False,
-                message="AD域认证失败，请检查用户名和密码"
+                message=detail
             )
     except ImportError:
         return ADConfigTestResponse(

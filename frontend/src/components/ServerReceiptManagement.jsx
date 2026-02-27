@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { receiptAPI, assetAPI, serverAPI } from '../services/api';
+import { receiptAPI, assetAPI, serverAPI, userAPI } from '../services/api';
 
 /**
  * 服务器入库单管理
@@ -56,6 +56,22 @@ const ServerReceiptManagement = () => {
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState(null);
   const fileInputRef = useRef(null);
+  const [adGroupOptions, setAdGroupOptions] = useState([]);
+
+  // 查询AD域用户组，用于部门联想
+  const searchAdGroups = async (keyword = '') => {
+    try {
+      const res = await userAPI.getAdGroups({
+        query: keyword.trim(),
+        limit: 50,
+      });
+      const items = Array.isArray(res.data?.items) ? res.data.items : [];
+      setAdGroupOptions(items.map((item) => item.name).filter(Boolean));
+    } catch (err) {
+      console.error('查询AD域用户组失败:', err);
+      setAdGroupOptions([]);
+    }
+  };
 
   // 处理服务器表单输入
   const handleServerInputChange = (e) => {
@@ -276,6 +292,7 @@ const ServerReceiptManagement = () => {
 
   useEffect(() => {
     fetchReceipts();
+    searchAdGroups('');
   }, []);
 
   const formatDateTime = (str) => {
@@ -348,10 +365,21 @@ const ServerReceiptManagement = () => {
                 <input
                   type="text"
                   value={formData.department}
-                  onChange={(e) => setFormData({ ...formData, department: e.target.value })}
-                  placeholder="请输入资产归属部门"
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setFormData({ ...formData, department: value });
+                    searchAdGroups(value);
+                  }}
+                  onFocus={() => searchAdGroups(formData.department || '')}
+                  list="server-receipt-ad-groups"
+                  placeholder="请输入或搜索AD域用户组"
                   style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
                 />
+                <datalist id="server-receipt-ad-groups">
+                  {adGroupOptions.map((name) => (
+                    <option key={name} value={name} />
+                  ))}
+                </datalist>
               </div>
               <div className="form-group">
                 <label>备注:</label>
@@ -774,7 +802,24 @@ const ServerReceiptManagement = () => {
                       </div>
                       <div className="form-group">
                         <label htmlFor="department">部门</label>
-                        <input type="text" id="department" name="department" value={serverFormData.department} onChange={handleServerInputChange} />
+                        <input
+                          type="text"
+                          id="department"
+                          name="department"
+                          value={serverFormData.department}
+                          onChange={(e) => {
+                            handleServerInputChange(e);
+                            searchAdGroups(e.target.value);
+                          }}
+                          onFocus={() => searchAdGroups(serverFormData.department || '')}
+                          list="server-item-ad-groups"
+                          placeholder="请输入或搜索AD域用户组"
+                        />
+                        <datalist id="server-item-ad-groups">
+                          {adGroupOptions.map((name) => (
+                            <option key={name} value={name} />
+                          ))}
+                        </datalist>
                       </div>
                     </div>
                   </div>

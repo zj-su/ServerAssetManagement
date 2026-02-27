@@ -8,8 +8,29 @@ import LoginForm from './components/LoginForm';
 import UserManagement from './components/UserManagement';
 import RoleManagement from './components/RoleManagement';
 import ADConfigManagement from './components/ADConfigManagement';
-import { serverAPI, assetAPI } from './services/api';
+import LocationManagement from './components/LocationManagement';
+import { serverAPI, assetAPI, userAPI, locationAPI } from './services/api';
 import './App.css';
+
+const parseRoleFromToken = (token) => {
+  try {
+    if (!token) return null;
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return payload?.role || null;
+  } catch (e) {
+    return null;
+  }
+};
+
+const parsePermissionsFromToken = (token) => {
+  try {
+    if (!token) return [];
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return Array.isArray(payload?.permissions) ? payload.permissions : [];
+  } catch (e) {
+    return [];
+  }
+};
 
 function App() {
   // 登录状态
@@ -23,8 +44,9 @@ function App() {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [editingServer, setEditingServer] = useState(null);
   const [activeMenu, setActiveMenu] = useState('server-receipt'); // 默认激活：服务器入库
-  const [racks, setRacks] = useState([]); // 机柜列表
-  const [selectedRack, setSelectedRack] = useState(null); // 选中的机柜
+  const [uLocation, setULocation] = useState('');
+  const [uSelectedServerId, setUSelectedServerId] = useState('');
+  const [uUpdating, setUUpdating] = useState(false);
   // 左侧菜单展开状态（按您提供的结构）
   const [isAssetOpen, setIsAssetOpen] = useState(true);      // 资产管理
   const [isAssetInOpen, setIsAssetInOpen] = useState(true);  // 资产入库
@@ -78,6 +100,55 @@ function App() {
     memory_gb: 16,
     disk_info: ''
   });
+  const [locationOptions, setLocationOptions] = useState([]);
+  const [adUserOptions, setAdUserOptions] = useState([]);
+  const [adGroupOptions, setAdGroupOptions] = useState([]);
+
+  // 查询AD域用户（用于“使用人”联想）
+  const searchAdUsers = async (keyword = '') => {
+    try {
+      const res = await userAPI.getUsers({
+        query: keyword.trim(),
+        is_ad_user: true,
+        limit: 50,
+      });
+      const users = Array.isArray(res.data) ? res.data : [];
+      const names = users
+        .map((u) => (u.display_name || u.username || '').trim())
+        .filter(Boolean);
+      setAdUserOptions([...new Set(names)]);
+    } catch (err) {
+      console.error('查询AD域用户失败:', err);
+      setAdUserOptions([]);
+    }
+  };
+
+  // 查询AD域用户组（用于“部门”联想）
+  const searchAdGroups = async (keyword = '') => {
+    try {
+      const res = await userAPI.getAdGroups({
+        query: keyword.trim(),
+        limit: 50,
+      });
+      const items = Array.isArray(res.data?.items) ? res.data.items : [];
+      const groups = items.map((item) => item.name).filter(Boolean);
+      setAdGroupOptions(groups);
+    } catch (err) {
+      console.error('查询AD域用户组失败:', err);
+      setAdGroupOptions([]);
+    }
+  };
+
+  const fetchLocationOptions = async () => {
+    try {
+      const res = await locationAPI.getLocations({ limit: 500 });
+      const list = Array.isArray(res.data) ? res.data : [];
+      setLocationOptions(list.map((item) => item.name).filter(Boolean));
+    } catch (err) {
+      console.error('获取位置列表失败:', err);
+      setLocationOptions([]);
+    }
+  };
 
   // 获取服务器列表
   const fetchServers = async () => {
@@ -95,6 +166,49 @@ function App() {
     }
   };
 
+  const permissions = Array.isArray(user?.permissions) ? user.permissions : [];
+  const hasPermission = (perm) => permissions.includes('*') || permissions.includes(perm);
+  const hasAnyPermission = (perms) => perms.some((p) => hasPermission(p));
+
+  const canReceiptMenu = hasAnyPermission(['receipt:read', 'receipt:write', 'receipt:delete']);
+  const canServerMenu = hasAnyPermission(['server:read', 'server:write', 'server:delete']);
+  const canPartMenu = hasAnyPermission(['part:read', 'part:write', 'part:delete']);
+  const canScrapMenu = hasAnyPermission(['scrap:read', 'scrap:write']);
+  const canUserMenu = hasPermission('user:read');
+  const canRoleMenu = hasPermission('role:read');
+  const canLdapMenu = hasPermission('role:write');
+
+  const showAssetGroup = canReceiptMenu || canServerMenu || canPartMenu;
+  const showAssetInGroup = canReceiptMenu;
+  const showAssetServerGroup = canServerMenu || canPartMenu;
+  const showIdcGroup = canServerMenu;
+  const showScrapGroup = canScrapMenu;
+  const showUserGroup = canUserMenu || canRoleMenu || canLdapMenu;
+  const hasAnyMenuAccess = showAssetGroup || showIdcGroup || showScrapGroup || showUserGroup;
+
+  const isMenuAllowed = (menu) => {
+    if (menu === 'server-receipt' || menu === 'part-receipt') return canReceiptMenu;
+    if (menu === 'servers') return canServerMenu;
+    if (menu === 'parts') return canPartMenu;
+    if (menu === 'server-u' || menu === 'server-power' || menu === 'locations') return canServerMenu;
+    if (menu === 'scrap-pending' || menu === 'scrap-done' || menu === 'scrap-recycle') return canScrapMenu;
+    if (menu === 'users') return canUserMenu;
+    if (menu === 'roles') return canRoleMenu;
+    if (menu === 'ldap') return canLdapMenu;
+    return true;
+  };
+
+  const getFirstAllowedMenu = () => {
+    if (canReceiptMenu) return 'server-receipt';
+    if (canServerMenu) return 'servers';
+    if (canPartMenu) return 'parts';
+    if (canScrapMenu) return 'scrap-pending';
+    if (canUserMenu) return 'users';
+    if (canRoleMenu) return 'roles';
+    if (canLdapMenu) return 'ldap';
+    return 'servers';
+  };
+
   // 检查本地存储的登录状态
   useEffect(() => {
     const token = localStorage.getItem('auth_token');
@@ -103,8 +217,14 @@ function App() {
     if (token && userStr) {
       try {
         const userData = JSON.parse(userStr);
+        const roleFromToken = parseRoleFromToken(token);
+        const role = userData?.role || roleFromToken || 'user';
+        const tokenPermissions = parsePermissionsFromToken(token);
+        const perms = Array.isArray(userData?.permissions) && userData.permissions.length > 0
+          ? userData.permissions
+          : tokenPermissions;
         setIsAuthenticated(true);
-        setUser(userData);
+        setUser({ ...userData, role, permissions: perms });
       } catch (e) {
         console.error('解析用户信息失败:', e);
         localStorage.removeItem('auth_token');
@@ -127,45 +247,152 @@ function App() {
   }, []);
 
   // 处理登录成功（与项目介绍一致：登录后保存 token，再进入主界面）
+  const resetTransientUiState = () => {
+    setSelectedServerId(null);
+    setShowCreateForm(false);
+    setEditingServer(null);
+    setShowHistoryModal(false);
+    setServerHistoryData([]);
+    setHistoryServerAssetCode(null);
+    setShowPartsModal(false);
+    setServerPartsData([]);
+    setPartsServerInfo(null);
+  };
+
   const handleLogin = (loginData) => {
+    resetTransientUiState();
     if (loginData.token) {
       localStorage.setItem('auth_token', loginData.token);
-      localStorage.setItem('auth_user', JSON.stringify({ username: loginData.username }));
+      localStorage.setItem('auth_user', JSON.stringify({
+        username: loginData.username,
+        role: loginData.role || 'user',
+        permissions: loginData.permissions || [],
+      }));
     }
     setIsAuthenticated(true);
-    setUser({ username: loginData.username });
+    setUser({
+      username: loginData.username,
+      role: loginData.role || 'user',
+      permissions: loginData.permissions || [],
+    });
     setLoading(false);
   };
 
   // 处理登出
   const handleLogoutClick = () => {
+    resetTransientUiState();
     localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_user');
     setIsAuthenticated(false);
     setUser(null);
   };
 
-  // 获取机柜列表（模拟数据）
-  const fetchRacks = () => {
-    // 模拟机柜数据
-    const rackList = [
-      { id: 1, name: 'A机柜', totalU: 42 },
-      { id: 2, name: 'B机柜', totalU: 42 },
-      { id: 3, name: 'C机柜', totalU: 42 }
-    ];
-    setRacks(rackList);
+  // 全局兜底：按 ESC 关闭可能卡住的遮罩层
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        resetTransientUiState();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  // 解析U位（兼容 "U12"、"12"、"A柜-12" 等）
+  const parseStartU = (uPosition) => {
+    if (!uPosition) return null;
+    const m = String(uPosition).match(/(\d{1,2})/);
+    if (!m) return null;
+    const n = parseInt(m[1], 10);
+    if (Number.isNaN(n) || n < 1 || n > 42) return null;
+    return n;
   };
 
-  // 选择机柜
-  const selectRack = (rack) => {
-    setSelectedRack(rack);
-    setActiveMenu('rack-detail');
+  const getServerHeight = (server) => {
+    const h = parseInt(server?.u_height, 10);
+    return Number.isNaN(h) || h <= 0 ? 1 : h;
   };
 
-  // 返回机柜列表（服务器U位）
-  const backToRackList = () => {
-    setSelectedRack(null);
-    setActiveMenu('server-u');
+  const uLocationServers = servers.filter((s) => {
+    const locationMatch = (s.location || '') === (uLocation || '');
+    const statusOk = s.status !== 'deleted' && s.status !== 'scrapped';
+    return locationMatch && statusOk;
+  });
+
+  // 构建42U占位图：key=U位(1-42) => { server, isStart, startU, endU }
+  const getRackOccupancy = () => {
+    const map = {};
+    uLocationServers.forEach((server) => {
+      const startU = parseStartU(server.u_position);
+      if (!startU) return;
+      const height = getServerHeight(server);
+      const endU = Math.min(42, startU + height - 1);
+      for (let u = startU; u <= endU; u += 1) {
+        map[u] = {
+          server,
+          isStart: u === startU,
+          startU,
+          endU,
+        };
+      }
+    });
+    return map;
+  };
+
+  const assignServerUPosition = async (startU) => {
+    if (!uLocation) {
+      alert('请先选择位置');
+      return;
+    }
+    if (!uSelectedServerId) {
+      alert('请先选择要摆放的服务器');
+      return;
+    }
+    const server = uLocationServers.find((s) => String(s.id) === String(uSelectedServerId));
+    if (!server) {
+      alert('未找到服务器，请重新选择');
+      return;
+    }
+    const height = getServerHeight(server);
+    const endU = startU + height - 1;
+    if (endU > 42) {
+      alert(`当前服务器高度为 ${height}U，起始U位过高，会超出42U机柜`);
+      return;
+    }
+
+    const occupancy = getRackOccupancy();
+    for (let u = startU; u <= endU; u += 1) {
+      const occupied = occupancy[u];
+      if (occupied && occupied.server.id !== server.id) {
+        alert(`U${u} 已被 ${occupied.server.asset_code || occupied.server.serial_number || occupied.server.hostname || occupied.server.id} 占用`);
+        return;
+      }
+    }
+
+    const currentStartU = parseStartU(server.u_position);
+    const currentLocation = server.location || '';
+    const isMoving = currentStartU !== null && (currentStartU !== startU || currentLocation !== uLocation);
+    if (isMoving) {
+      const fromText = `${currentLocation || '未设置位置'} / U${currentStartU}`;
+      const toText = `${uLocation} / U${startU}`;
+      const ok = window.confirm(`服务器当前位于：${fromText}\n即将移动到：${toText}\n\n确认要移动吗？`);
+      if (!ok) return;
+    }
+
+    try {
+      setUUpdating(true);
+      await serverAPI.updateServer(server.id, {
+        u_position: `U${startU}`,
+        location: uLocation,
+      });
+      await fetchServers();
+      alert(`已将服务器放置到 U${startU}（${height}U）`);
+    } catch (err) {
+      console.error('更新服务器U位失败:', err);
+      alert('更新U位失败: ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setUUpdating(false);
+    }
   };
 
   // 切换资产管理展开
@@ -486,9 +713,17 @@ function App() {
   useEffect(() => {
     if (isAuthenticated) {
       fetchServers();
-      fetchRacks();
+      searchAdUsers('');
+      searchAdGroups('');
+      fetchLocationOptions();
     }
   }, [isAuthenticated]);
+
+  useEffect(() => {
+    if (!uLocation && locationOptions.length > 0) {
+      setULocation(locationOptions[0]);
+    }
+  }, [locationOptions, uLocation]);
 
   // 监听服务器数据变化事件（入库/删除入库单时触发）
   useEffect(() => {
@@ -512,10 +747,17 @@ function App() {
       setIsAssetOpen(true);
       setIsAssetServerOpen(true);
     }
-    if (['server-u', 'server-power'].includes(activeMenu)) setIsIdcOpen(true);
+    if (['server-u', 'server-power', 'locations'].includes(activeMenu)) setIsIdcOpen(true);
     if (['scrap-pending', 'scrap-done', 'scrap-recycle'].includes(activeMenu)) setIsScrapOpen(true);
     if (['users', 'roles', 'ldap'].includes(activeMenu)) setIsUserOpen(true);
   }, [activeMenu]);
+
+  // 无权限时禁止进入对应菜单，并跳转到首个可访问菜单
+  useEffect(() => {
+    if (hasAnyMenuAccess && !isMenuAllowed(activeMenu)) {
+      setActiveMenu(getFirstAllowedMenu());
+    }
+  }, [activeMenu, permissions, hasAnyMenuAccess]);
 
   // 与项目介绍一致：未登录时显示登录页，登录后显示主界面（含资产管理、入库单、用户管理等）
   if (!isAuthenticated) {
@@ -549,7 +791,7 @@ function App() {
         <nav className="sidebar">
           <ul className="sidebar-menu">
             {/* 资产管理 */}
-            <li className={`menu-group ${isAssetOpen ? 'open' : ''}`}>
+            {showAssetGroup && <li className={`menu-group ${isAssetOpen ? 'open' : ''}`}>
               <div className="menu-item menu-parent" onClick={toggleAsset}>
                 <span className="menu-label">资产管理</span>
                 <span className="menu-arrow">{isAssetOpen ? '▼' : '▶'}</span>
@@ -557,7 +799,7 @@ function App() {
               {isAssetOpen && (
                 <ul className="submenu">
                   {/* 资产入库 */}
-                  <li className={`menu-group level2 ${isAssetInOpen ? 'open' : ''}`}>
+                  {showAssetInGroup && <li className={`menu-group level2 ${isAssetInOpen ? 'open' : ''}`}>
                     <div className="menu-item menu-parent" onClick={(e) => { e.stopPropagation(); toggleAssetIn(); }}>
                       <span className="menu-label">资产入库</span>
                       <span className="menu-arrow">{isAssetInOpen ? '▼' : '▶'}</span>
@@ -572,30 +814,34 @@ function App() {
                         </li>
                       </ul>
                     )}
-                  </li>
+                  </li>}
                   {/* 服务器资产 */}
-                  <li className={`menu-group level2 ${isAssetServerOpen ? 'open' : ''}`}>
+                  {showAssetServerGroup && <li className={`menu-group level2 ${isAssetServerOpen ? 'open' : ''}`}>
                     <div className="menu-item menu-parent" onClick={(e) => { e.stopPropagation(); toggleAssetServer(); }}>
                       <span className="menu-label">服务器资产</span>
                       <span className="menu-arrow">{isAssetServerOpen ? '▼' : '▶'}</span>
                     </div>
                     {isAssetServerOpen && (
                       <ul className="submenu submenu2">
-                        <li className={activeMenu === 'servers' ? 'active' : ''} onClick={() => setActiveMenu('servers')}>
-                          <span>服务器</span>
-                        </li>
-                        <li className={activeMenu === 'parts' ? 'active' : ''} onClick={() => setActiveMenu('parts')}>
-                          <span>配件</span>
-                        </li>
+                        {canServerMenu && (
+                          <li className={activeMenu === 'servers' ? 'active' : ''} onClick={() => setActiveMenu('servers')}>
+                            <span>服务器</span>
+                          </li>
+                        )}
+                        {canPartMenu && (
+                          <li className={activeMenu === 'parts' ? 'active' : ''} onClick={() => setActiveMenu('parts')}>
+                            <span>配件</span>
+                          </li>
+                        )}
                       </ul>
                     )}
-                  </li>
+                  </li>}
                 </ul>
               )}
-            </li>
+            </li>}
 
             {/* 机房管理 */}
-            <li className={`menu-group ${isIdcOpen ? 'open' : ''}`}>
+            {showIdcGroup && <li className={`menu-group ${isIdcOpen ? 'open' : ''}`}>
               <div className="menu-item menu-parent" onClick={toggleIdc}>
                 <span className="menu-label">机房管理</span>
                 <span className="menu-arrow">{isIdcOpen ? '▼' : '▶'}</span>
@@ -608,12 +854,15 @@ function App() {
                   <li className={activeMenu === 'server-power' ? 'active' : ''} onClick={() => setActiveMenu('server-power')}>
                     <span>服务器功耗</span>
                   </li>
+                  <li className={activeMenu === 'locations' ? 'active' : ''} onClick={() => setActiveMenu('locations')}>
+                    <span>位置</span>
+                  </li>
                 </ul>
               )}
-            </li>
+            </li>}
 
             {/* 资产报废 */}
-            <li className={`menu-group ${isScrapOpen ? 'open' : ''}`}>
+            {showScrapGroup && <li className={`menu-group ${isScrapOpen ? 'open' : ''}`}>
               <div className="menu-item menu-parent" onClick={toggleScrap}>
                 <span className="menu-label">资产报废</span>
                 <span className="menu-arrow">{isScrapOpen ? '▼' : '▶'}</span>
@@ -631,39 +880,56 @@ function App() {
                   </li>
                 </ul>
               )}
-            </li>
+            </li>}
 
-            {/* 用户管理 */}
-            <li className={`menu-group ${isUserOpen ? 'open' : ''}`}>
-              <div className="menu-item menu-parent" onClick={toggleUser}>
-                <span className="menu-label">用户管理</span>
-                <span className="menu-arrow">{isUserOpen ? '▼' : '▶'}</span>
-              </div>
-              {isUserOpen && (
-                <ul className="submenu">
-                  <li className={activeMenu === 'users' ? 'active' : ''} onClick={() => setActiveMenu('users')}>
-                    <span>用户</span>
-                  </li>
-                  <li className={activeMenu === 'roles' ? 'active' : ''} onClick={() => setActiveMenu('roles')}>
-                    <span>角色管理</span>
-                  </li>
-                  <li className={activeMenu === 'ldap' ? 'active' : ''} onClick={() => setActiveMenu('ldap')}>
-                    <span>LDAP配置</span>
-                  </li>
-                </ul>
-              )}
-            </li>
+            {showUserGroup && (
+              <li className={`menu-group ${isUserOpen ? 'open' : ''}`}>
+                <div className="menu-item menu-parent" onClick={toggleUser}>
+                  <span className="menu-label">用户管理</span>
+                  <span className="menu-arrow">{isUserOpen ? '▼' : '▶'}</span>
+                </div>
+                {isUserOpen && (
+                  <ul className="submenu">
+                    {hasPermission('user:read') && (
+                      <li className={activeMenu === 'users' ? 'active' : ''} onClick={() => setActiveMenu('users')}>
+                        <span>用户</span>
+                      </li>
+                    )}
+                    {hasPermission('role:read') && (
+                      <li className={activeMenu === 'roles' ? 'active' : ''} onClick={() => setActiveMenu('roles')}>
+                        <span>角色管理</span>
+                      </li>
+                    )}
+                    {hasPermission('role:write') && (
+                      <li className={activeMenu === 'ldap' ? 'active' : ''} onClick={() => setActiveMenu('ldap')}>
+                        <span>LDAP配置</span>
+                      </li>
+                    )}
+                  </ul>
+                )}
+              </li>
+            )}
           </ul>
         </nav>
         
         {/* 主内容区域 */}
         <main className="App-main">
+          {!hasAnyMenuAccess && (
+            <section className="placeholder">
+              <h2>当前账号暂无访问权限</h2>
+              <p>未分配任何菜单权限，请联系管理员为您配置角色权限。</p>
+              <div style={{ marginTop: '16px' }}>
+                <button className="btn-logout" onClick={handleLogoutClick}>退出登录</button>
+              </div>
+            </section>
+          )}
+
           {/* 资产入库：服务器入库 / 配件入库 */}
-          {activeMenu === 'server-receipt' && <ServerReceiptManagement />}
-          {activeMenu === 'part-receipt' && <PartReceiptManagement />}
+          {activeMenu === 'server-receipt' && canReceiptMenu && <ServerReceiptManagement />}
+          {activeMenu === 'part-receipt' && canReceiptMenu && <PartReceiptManagement />}
 
           {/* 服务器资产：服务器 / 配件 */}
-          {activeMenu === 'servers' && (
+          {activeMenu === 'servers' && canServerMenu && (
             <section className="dashboard">
               <div className="section-header">
                 <h2>服务器概览</h2>
@@ -762,10 +1028,10 @@ function App() {
                           <td>
                             <button className="btn-primary" onClick={() => viewServerDetail(server.id)}>详情</button>
                             <button className="btn-success" onClick={() => viewServerParts(server)}>配件</button>
-                            <button className="btn-secondary" onClick={() => openEditServerForm(server)}>编辑</button>
+                            {hasPermission('server:write') && <button className="btn-secondary" onClick={() => openEditServerForm(server)}>编辑</button>}
                             <button className="btn-info" onClick={() => viewServerHistory(server.id, server.asset_code)}>历史</button>
-                            <button className="btn-warning" onClick={() => scrapServer(server.id)}>报废</button>
-                            <button className="btn-danger" onClick={() => deleteServer(server.id)}>删除</button>
+                            {hasPermission('scrap:write') && <button className="btn-warning" onClick={() => scrapServer(server.id)}>报废</button>}
+                            {hasPermission('server:delete') && <button className="btn-danger" onClick={() => deleteServer(server.id)}>删除</button>}
                           </td>
                         </tr>
                       ))}
@@ -775,66 +1041,166 @@ function App() {
               )}
             </section>
           )}
-          {activeMenu === 'parts' && <PartsManagement />}
+          {activeMenu === 'parts' && canPartMenu && <PartsManagement />}
 
           {/* 机房管理：服务器U位 / 服务器功耗 */}
-          {activeMenu === 'server-u' && (
+          {activeMenu === 'server-u' && canServerMenu && (
             <section className="rack-management">
               <div className="section-header">
                 <h2>服务器U位</h2>
                 <div className="header-actions">
-                  <button className="btn-primary">添加机柜</button>
+                  <button className="btn-refresh" onClick={fetchServers}>刷新</button>
                 </div>
               </div>
-              <div className="racks-grid">
-                {racks.map(rack => (
-                  <div key={rack.id} className="rack-card" onClick={() => selectRack(rack)}>
-                    <h3>{rack.name}</h3>
-                    <p>总U数: {rack.totalU}</p>
-                    <button className="btn-primary">查看详情</button>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: '16px', alignItems: 'start' }}>
+                <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px' }}>
+                  <div className="form-group" style={{ marginBottom: '10px' }}>
+                    <label>位置</label>
+                    <select value={uLocation} onChange={(e) => { setULocation(e.target.value); setUSelectedServerId(''); }}>
+                      <option value="">请选择位置</option>
+                      {locationOptions.map((name) => (
+                        <option key={name} value={name}>{name}</option>
+                      ))}
+                    </select>
                   </div>
-                ))}
+
+                  <div className="form-group" style={{ marginBottom: '10px' }}>
+                    <label>选择服务器（待分配U位）</label>
+                    <select value={uSelectedServerId} onChange={(e) => setUSelectedServerId(e.target.value)} disabled={!uLocation || uUpdating}>
+                      <option value="">请选择</option>
+                      {uLocationServers.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.serial_number || '无SN'} / {getServerHeight(s)}U / {s.u_position || '未分配'}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div style={{ fontSize: '12px', color: '#64748b', textAlign: 'left' }}>
+                    说明：按照国际42U机柜标准，底部为 U1，顶部为 U42。点击右侧空U位可摆放选中服务器。
+                  </div>
+                </div>
+
+                <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px' }}>
+                  <h3 style={{ marginTop: 0, marginBottom: '10px', textAlign: 'left' }}>{uLocation || '未选择位置'}</h3>
+                  <div className="servers-list" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+                    {(() => {
+                      const occupancy = getRackOccupancy();
+                      const selectedServer = uLocationServers.find((s) => String(s.id) === String(uSelectedServerId));
+                      const selectedHeight = selectedServer ? getServerHeight(selectedServer) : 1;
+                      return (
+                        <table
+                          style={{
+                            tableLayout: 'fixed',
+                            width: '100%',
+                            fontSize: '13px',
+                            borderCollapse: 'collapse',
+                            border: '1px solid #9ca3af',
+                            background: '#fff',
+                          }}
+                        >
+                          <colgroup>
+                            <col style={{ width: '46px' }} />
+                            <col style={{ width: '140px' }} />
+                            <col style={{ width: '180px' }} />
+                            <col style={{ width: '120px' }} />
+                            <col style={{ width: '140px' }} />
+                            <col style={{ width: '150px' }} />
+                            <col style={{ width: '150px' }} />
+                          </colgroup>
+                          <thead>
+                            <tr>
+                              <th
+                                colSpan="7"
+                                style={{
+                                  textAlign: 'left',
+                                  background: '#fff',
+                                  fontWeight: 600,
+                                  border: '1px solid #9ca3af',
+                                }}
+                              >
+                                {uLocation || '未选择位置'}
+                              </th>
+                            </tr>
+                            <tr>
+                              <th style={{ border: '1px solid #9ca3af', background: '#fff', padding: '4px 2px' }}>U位</th>
+                              <th style={{ border: '1px solid #9ca3af', background: '#fff' }}>SN号</th>
+                              <th style={{ border: '1px solid #9ca3af', background: '#fff' }}>服务器型号</th>
+                              <th style={{ border: '1px solid #9ca3af', background: '#fff' }}>使用人</th>
+                              <th style={{ border: '1px solid #9ca3af', background: '#fff' }}>使用部门</th>
+                              <th style={{ border: '1px solid #9ca3af', background: '#fff' }}>系统IP</th>
+                              <th style={{ border: '1px solid #9ca3af', background: '#fff' }}>BMC</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {Array.from({ length: 42 }, (_, i) => 42 - i).map((u) => {
+                              const occ = occupancy[u];
+                              const canPlace = selectedServer ? (u + selectedHeight - 1 <= 42) : false;
+                              if (occ) {
+                                const isSelected = String(occ.server.id) === String(uSelectedServerId);
+                                const rowSpan = occ.endU - occ.startU + 1;
+                                // 表格按 42 -> 1 展示，合并单元格应从占用块的顶部开始
+                                const isBlockTopRow = u === occ.endU;
+                                return (
+                                  <tr key={u} onClick={() => setUSelectedServerId(String(occ.server.id))} style={{ cursor: 'pointer', background: isSelected ? '#cfe0ff' : '#fff' }}>
+                                    <td style={{ width: '46px', border: '1px solid #9ca3af', textAlign: 'center', padding: '4px 2px' }}>{u}</td>
+                                    {isBlockTopRow && (
+                                      <>
+                                        <td rowSpan={rowSpan} style={{ border: '1px solid #9ca3af', verticalAlign: 'middle' }}>{occ.server.serial_number || ''}</td>
+                                        <td rowSpan={rowSpan} style={{ border: '1px solid #9ca3af', verticalAlign: 'middle' }}>{occ.server.brand || ''} {occ.server.model || occ.server.hostname || ''}</td>
+                                        <td rowSpan={rowSpan} style={{ border: '1px solid #9ca3af', verticalAlign: 'middle' }}>{occ.server.user_person || ''}</td>
+                                        <td rowSpan={rowSpan} style={{ border: '1px solid #9ca3af', verticalAlign: 'middle' }}>{occ.server.department || ''}</td>
+                                        <td rowSpan={rowSpan} style={{ border: '1px solid #9ca3af', verticalAlign: 'middle' }}>{occ.server.ip_address || ''}</td>
+                                        <td rowSpan={rowSpan} style={{ border: '1px solid #9ca3af', verticalAlign: 'middle' }}>{occ.server.bmc_ip || ''}</td>
+                                      </>
+                                    )}
+                                  </tr>
+                                );
+                              }
+                              return (
+                                <tr key={u} onClick={() => { if (uSelectedServerId && canPlace && !uUpdating) assignServerUPosition(u); }} style={{ cursor: uSelectedServerId && canPlace ? 'pointer' : 'default' }}>
+                                  <td style={{ width: '46px', border: '1px solid #9ca3af', textAlign: 'center', padding: '4px 2px' }}>{u}</td>
+                                  <td style={{ border: '1px solid #9ca3af' }}></td>
+                                  <td style={{ border: '1px solid #9ca3af' }}></td>
+                                  <td style={{ border: '1px solid #9ca3af' }}></td>
+                                  <td style={{ border: '1px solid #9ca3af' }}></td>
+                                  <td style={{ border: '1px solid #9ca3af' }}></td>
+                                  <td style={{ border: '1px solid #9ca3af' }}></td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      );
+                    })()}
+                  </div>
+                </div>
               </div>
             </section>
           )}
-          {activeMenu === 'server-power' && (
+          {activeMenu === 'server-power' && canServerMenu && (
             <section className="placeholder">
               <h2>服务器功耗</h2>
               <p>此功能正在开发中...</p>
             </section>
           )}
-
-          {/* 机柜详情（从服务器U位进入） */}
-          {activeMenu === 'rack-detail' && selectedRack && (
-            <section className="rack-detail">
-              <div className="section-header">
-                <h2>{selectedRack.name} - 机柜详情</h2>
-                <div className="header-actions">
-                  <button className="btn-secondary" onClick={backToRackList}>返回</button>
-                </div>
-              </div>
-              <div className="rack-visualization">
-                <h3>42U机柜布局</h3>
-                <div className="rack-u-spaces">
-                  {[...Array(selectedRack.totalU)].map((_, index) => (
-                    <div key={index} className="u-space">U{index + 1}</div>
-                  ))}
-                </div>
-              </div>
-            </section>
+          {activeMenu === 'locations' && canServerMenu && (
+            <LocationManagement permissions={permissions} />
           )}
 
           {/* 资产报废：资产待报废 / 报废资产 / 删除回收站 */}
-          {['scrap-pending', 'scrap-done', 'scrap-recycle'].includes(activeMenu) && (
+          {['scrap-pending', 'scrap-done', 'scrap-recycle'].includes(activeMenu) && canScrapMenu && (
             <AssetScrapManagement
+              permissions={permissions}
               initialTab={activeMenu === 'scrap-pending' ? 'pending' : activeMenu === 'scrap-done' ? 'scrapped' : 'recycle'}
             />
           )}
 
           {/* 用户管理：用户 / 角色管理 / LDAP配置 */}
-          {activeMenu === 'users' && <UserManagement />}
-          {activeMenu === 'roles' && <RoleManagement />}
-          {activeMenu === 'ldap' && <ADConfigManagement />}
+          {activeMenu === 'users' && hasPermission('user:read') && <UserManagement currentUserRole={user?.role} permissions={permissions} />}
+          {activeMenu === 'roles' && hasPermission('role:read') && <RoleManagement />}
+          {activeMenu === 'ldap' && hasPermission('role:write') && <ADConfigManagement />}
         </main>
       </div>
 
@@ -848,8 +1214,8 @@ function App() {
       
       {/* 创建/编辑服务器表单模态框（OA 风格） */}
       {showCreateForm && (
-        <div className="modal-overlay">
-          <div className="modal-content modal-form-server oa-form">
+        <div className="modal-overlay" onClick={closeServerForm}>
+          <div className="modal-content modal-form-server oa-form" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header server-detail-header">
               <div className="server-detail-title-wrap">
                 <h2>服务器资产</h2>
@@ -938,7 +1304,24 @@ function App() {
                     <div className="form-row">
                       <div className="form-group">
                         <label htmlFor="user_person">使用人</label>
-                        <input type="text" id="user_person" name="user_person" value={serverFormData.user_person} onChange={handleServerInputChange} />
+                        <input
+                          type="text"
+                          id="user_person"
+                          name="user_person"
+                          value={serverFormData.user_person}
+                          onChange={(e) => {
+                            handleServerInputChange(e);
+                            searchAdUsers(e.target.value);
+                          }}
+                          onFocus={() => searchAdUsers(serverFormData.user_person || '')}
+                          list="server-ad-users"
+                          placeholder="请输入或搜索AD域用户"
+                        />
+                        <datalist id="server-ad-users">
+                          {adUserOptions.map((name) => (
+                            <option key={name} value={name} />
+                          ))}
+                        </datalist>
                       </div>
                       <div className="form-group">
                         <label htmlFor="u_position">U位</label>
@@ -950,11 +1333,33 @@ function App() {
                       </div>
                       <div className="form-group">
                         <label htmlFor="location">位置</label>
-                        <input type="text" id="location" name="location" value={serverFormData.location} onChange={handleServerInputChange} />
+                        <select id="location" name="location" value={serverFormData.location || ''} onChange={handleServerInputChange}>
+                          <option value="">请选择位置</option>
+                          {Array.from(new Set([...(locationOptions || []), serverFormData.location || ''].filter(Boolean))).map((name) => (
+                            <option key={name} value={name}>{name}</option>
+                          ))}
+                        </select>
                       </div>
                       <div className="form-group">
                         <label htmlFor="department">部门</label>
-                        <input type="text" id="department" name="department" value={serverFormData.department} onChange={handleServerInputChange} />
+                        <input
+                          type="text"
+                          id="department"
+                          name="department"
+                          value={serverFormData.department}
+                          onChange={(e) => {
+                            handleServerInputChange(e);
+                            searchAdGroups(e.target.value);
+                          }}
+                          onFocus={() => searchAdGroups(serverFormData.department || '')}
+                          list="server-ad-groups"
+                          placeholder="请输入或搜索AD域用户组"
+                        />
+                        <datalist id="server-ad-groups">
+                          {adGroupOptions.map((name) => (
+                            <option key={name} value={name} />
+                          ))}
+                        </datalist>
                       </div>
                     </div>
                   </div>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { assetAPI, serverAPI } from '../services/api';
+import { assetAPI, serverAPI, userAPI, locationAPI } from '../services/api';
 import '../App.css';
 
 /**
@@ -105,6 +105,55 @@ const PartsManagement = () => {
   const [serverSearchLoading, setServerSearchLoading] = useState(false);
   const serverSearchRef = useRef(null);
   const serverDropdownRef = useRef(null);
+  const [adUserOptions, setAdUserOptions] = useState([]);
+  const [adGroupOptions, setAdGroupOptions] = useState([]);
+  const [locationOptions, setLocationOptions] = useState([]);
+
+  // 查询AD域用户（用于“使用人”联想）
+  const searchAdUsers = async (keyword = '') => {
+    try {
+      const res = await userAPI.getUsers({
+        query: keyword.trim(),
+        is_ad_user: true,
+        limit: 50,
+      });
+      const users = Array.isArray(res.data) ? res.data : [];
+      const names = users
+        .map((u) => (u.display_name || u.username || '').trim())
+        .filter(Boolean);
+      setAdUserOptions([...new Set(names)]);
+    } catch (err) {
+      console.error('查询AD域用户失败:', err);
+      setAdUserOptions([]);
+    }
+  };
+
+  // 查询AD域用户组（用于“部门”联想）
+  const searchAdGroups = async (keyword = '') => {
+    try {
+      const res = await userAPI.getAdGroups({
+        query: keyword.trim(),
+        limit: 50,
+      });
+      const items = Array.isArray(res.data?.items) ? res.data.items : [];
+      const groups = items.map((item) => item.name).filter(Boolean);
+      setAdGroupOptions(groups);
+    } catch (err) {
+      console.error('查询AD域用户组失败:', err);
+      setAdGroupOptions([]);
+    }
+  };
+
+  const fetchLocationOptions = async () => {
+    try {
+      const res = await locationAPI.getLocations({ limit: 500 });
+      const list = Array.isArray(res.data) ? res.data : [];
+      setLocationOptions(list.map((item) => item.name).filter(Boolean));
+    } catch (err) {
+      console.error('获取位置列表失败:', err);
+      setLocationOptions([]);
+    }
+  };
 
   // 搜索服务器
   const searchServers = async (keyword) => {
@@ -203,6 +252,9 @@ const PartsManagement = () => {
 
   useEffect(() => {
     fetchParts();
+    searchAdUsers('');
+    searchAdGroups('');
+    fetchLocationOptions();
   }, []);
 
   // 监听配件数据变化事件（入库/删除入库单时触发）
@@ -371,8 +423,15 @@ const PartsManagement = () => {
       }
     }
     
+    // 后端资产接口要求 datetime，这里把 date 输入补全为当天 00:00:00
     if (payload.purchase_date === '') payload.purchase_date = null;
+    else if (typeof payload.purchase_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(payload.purchase_date)) {
+      payload.purchase_date = `${payload.purchase_date}T00:00:00`;
+    }
     if (payload.warranty_expiry === '') payload.warranty_expiry = null;
+    else if (typeof payload.warranty_expiry === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(payload.warranty_expiry)) {
+      payload.warranty_expiry = `${payload.warranty_expiry}T00:00:00`;
+    }
     ['cpu_cores', 'u_height', 'memory_gb'].forEach(k => {
       if (payload[k] === '' || payload[k] == null) payload[k] = null;
       else if (typeof payload[k] !== 'number') payload[k] = parseInt(payload[k], 10);
@@ -686,7 +745,23 @@ const PartsManagement = () => {
                     <div className="form-row">
                       <div className="form-group">
                         <label>使用人</label>
-                        <input type="text" name="user" value={formData.user} onChange={handleInputChange} />
+                        <input
+                          type="text"
+                          name="user"
+                          value={formData.user}
+                          onChange={(e) => {
+                            handleInputChange(e);
+                            searchAdUsers(e.target.value);
+                          }}
+                          onFocus={() => searchAdUsers(formData.user || '')}
+                          list="part-ad-users"
+                          placeholder="请输入或搜索AD域用户"
+                        />
+                        <datalist id="part-ad-users">
+                          {adUserOptions.map((name) => (
+                            <option key={name} value={name} />
+                          ))}
+                        </datalist>
                       </div>
                       <div className="form-group" style={{ position: 'relative' }}>
                         <label>关联服务器</label>
@@ -773,11 +848,32 @@ const PartsManagement = () => {
                     <div className="form-row">
                       <div className="form-group">
                         <label>位置</label>
-                        <input type="text" name="location" value={formData.location} onChange={handleInputChange} />
+                        <select name="location" value={formData.location || ''} onChange={handleInputChange}>
+                          <option value="">请选择位置</option>
+                          {Array.from(new Set([...(locationOptions || []), formData.location || ''].filter(Boolean))).map((name) => (
+                            <option key={name} value={name}>{name}</option>
+                          ))}
+                        </select>
                       </div>
                       <div className="form-group">
                         <label>部门</label>
-                        <input type="text" name="department" value={formData.department} onChange={handleInputChange} />
+                        <input
+                          type="text"
+                          name="department"
+                          value={formData.department}
+                          onChange={(e) => {
+                            handleInputChange(e);
+                            searchAdGroups(e.target.value);
+                          }}
+                          onFocus={() => searchAdGroups(formData.department || '')}
+                          list="part-ad-groups"
+                          placeholder="请输入或搜索AD域用户组"
+                        />
+                        <datalist id="part-ad-groups">
+                          {adGroupOptions.map((name) => (
+                            <option key={name} value={name} />
+                          ))}
+                        </datalist>
                       </div>
                     </div>
                   </div>

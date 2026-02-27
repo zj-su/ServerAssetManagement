@@ -7,6 +7,44 @@ const api = axios.create({
   timeout: 10000,
 });
 
+const normalizeErrorDetail = (detail) => {
+  if (typeof detail === 'string') return detail;
+
+  if (Array.isArray(detail)) {
+    const msgs = detail.map((item) => {
+      if (typeof item === 'string') return item;
+      if (item && typeof item === 'object') {
+        const msg = item.msg || item.message;
+        const loc = Array.isArray(item.loc)
+          ? item.loc.filter((p) => p !== 'body').join('.')
+          : '';
+        if (msg && loc) return `${loc}: ${msg}`;
+        if (msg) return msg;
+        try {
+          return JSON.stringify(item);
+        } catch (e) {
+          return String(item);
+        }
+      }
+      return String(item);
+    }).filter(Boolean);
+    return msgs.join('; ');
+  }
+
+  if (detail && typeof detail === 'object') {
+    if (typeof detail.message === 'string') return detail.message;
+    if (typeof detail.msg === 'string') return detail.msg;
+    try {
+      return JSON.stringify(detail);
+    } catch (e) {
+      return String(detail);
+    }
+  }
+
+  if (detail == null) return '';
+  return String(detail);
+};
+
 // 请求拦截器：始终携带 Token（未登录时由后端返回 401/403）
 api.interceptors.request.use(
   (config) => {
@@ -31,6 +69,20 @@ api.interceptors.response.use(
     if (isLoginOrRegister) {
       return Promise.reject(error);
     }
+
+    // 统一后端错误格式，避免前端提示 [object Object]
+    const rawDetail = error.response?.data?.detail;
+    const normalizedDetail = normalizeErrorDetail(rawDetail);
+    if (error.response?.data && rawDetail !== undefined) {
+      error.response.data.detail = normalizedDetail;
+    }
+    if (
+      normalizedDetail &&
+      (!error.message || error.message.startsWith('Request failed with status code'))
+    ) {
+      error.message = normalizedDetail;
+    }
+
     const status = error.response?.status;
     const detail = error.response?.data?.detail;
     const authDetails = ['Not authenticated', '无效的认证token', '用户不存在', '未提供认证信息'];
@@ -222,14 +274,23 @@ export const receiptAPI = {
 
 // 用户管理相关API
 export const userAPI = {
+  // 新增本地用户
+  createUser: (data) => api.post('/users/register', data),
+
   // 获取用户列表
   getUsers: (params = {}) => api.get('/users/list', { params }),
+
+  // 获取用户总数（分页）
+  countUsers: (params = {}) => api.get('/users/count', { params }),
+
+  // 获取本地快照的AD域用户组（组名 + 成员）
+  getAdGroups: (params = {}) => api.get('/users/ad-groups', { params }),
   
   // 获取用户详情
   getUser: (id) => api.get(`/users/${id}`),
   
   // 搜索用户
-  searchUsers: (query) => api.get(`/users/search?query=${query}`),
+  searchUsers: (query, params = {}) => api.get('/users/search', { params: { query, ...params } }),
   
   // 获取AD域用户组
   getUserGroups: (id) => api.get(`/users/${id}/groups`),
@@ -239,6 +300,9 @@ export const userAPI = {
   
   // 批量同步AD域用户
   syncAllAdUsers: () => api.post('/users/sync-all-ad-users'),
+
+  // 更新用户信息（可用于分配角色）
+  updateUser: (id, data) => api.put(`/users/${id}`, data),
 };
 
 // AD域配置相关API（带尾部斜杠避免 307）
@@ -247,10 +311,10 @@ export const adConfigAPI = {
   getConfig: () => api.get('/ad-config/'),
   
   // 创建/更新AD域配置
-  updateConfig: (data) => api.post('/ad-config', data),
+  updateConfig: (data) => api.post('/ad-config/', data),
   
   // 删除AD域配置
-  deleteConfig: () => api.delete('/ad-config'),
+  deleteConfig: () => api.delete('/ad-config/'),
   
   // 测试AD域连接
   testConfig: (data) => api.post('/ad-config/test', data),
@@ -274,6 +338,15 @@ export const roleAPI = {
   deleteRole: (id) => api.delete(`/roles/${id}`),
 };
 
+// 位置管理相关API（机房/仓库地址）
+export const locationAPI = {
+  getLocations: (params = {}) => api.get('/locations/', { params }),
+  countLocations: (params = {}) => api.get('/locations/count', { params }),
+  createLocation: (data) => api.post('/locations/', data),
+  updateLocation: (id, data) => api.put(`/locations/${id}`, data),
+  deleteLocation: (id) => api.delete(`/locations/${id}`),
+};
+
 export default {
   serverAPI,
   authAPI,
@@ -282,4 +355,5 @@ export default {
   userAPI,
   adConfigAPI,
   roleAPI,
+  locationAPI,
 };

@@ -2,6 +2,24 @@ import React, { useState, useRef, useEffect } from 'react';
 import { authAPI } from '../services/api';
 import '../App.css';
 
+const getRoleFromToken = (token) => {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return payload?.role || null;
+  } catch (e) {
+    return null;
+  }
+};
+
+const getPermissionsFromToken = (token) => {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return Array.isArray(payload?.permissions) ? payload.permissions : [];
+  } catch (e) {
+    return [];
+  }
+};
+
 function LoginForm({ onLogin }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -32,9 +50,11 @@ function LoginForm({ onLogin }) {
         setError('登录响应异常，请重试');
         return;
       }
+      const role = data?.role || getRoleFromToken(token) || 'user';
+      const permissions = Array.isArray(data?.permissions) ? data.permissions : getPermissionsFromToken(token);
       localStorage.setItem('auth_token', token);
-      localStorage.setItem('auth_user', JSON.stringify({ username }));
-      onLogin({ username, token });
+      localStorage.setItem('auth_user', JSON.stringify({ username, role, permissions }));
+      onLogin({ username, role, permissions, token });
     } catch (err) {
       if (!isMountedRef.current) return;
       const detail = err.response?.data?.detail;

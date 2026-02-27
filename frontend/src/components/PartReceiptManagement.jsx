@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { receiptAPI, assetAPI, serverAPI } from '../services/api';
+import { receiptAPI, assetAPI, serverAPI, userAPI } from '../services/api';
 
 /**
  * 配件入库单管理
@@ -104,6 +104,22 @@ const PartReceiptManagement = () => {
   // 批量导入配件状态
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState(null);
+  const [adGroupOptions, setAdGroupOptions] = useState([]);
+
+  // 查询AD域用户组，用于部门联想
+  const searchAdGroups = async (keyword = '') => {
+    try {
+      const res = await userAPI.getAdGroups({
+        query: keyword.trim(),
+        limit: 50,
+      });
+      const items = Array.isArray(res.data?.items) ? res.data.items : [];
+      setAdGroupOptions(items.map((item) => item.name).filter(Boolean));
+    } catch (err) {
+      console.error('查询AD域用户组失败:', err);
+      setAdGroupOptions([]);
+    }
+  };
 
   // 搜索服务器
   const searchServers = async (keyword) => {
@@ -447,6 +463,7 @@ const PartReceiptManagement = () => {
 
   useEffect(() => {
     fetchReceipts();
+    searchAdGroups('');
   }, []);
 
   const formatDateTime = (str) => {
@@ -520,10 +537,21 @@ const PartReceiptManagement = () => {
                 <input
                   type="text"
                   value={formData.department}
-                  onChange={(e) => setFormData({ ...formData, department: e.target.value })}
-                  placeholder="请输入资产归属部门"
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setFormData({ ...formData, department: value });
+                    searchAdGroups(value);
+                  }}
+                  onFocus={() => searchAdGroups(formData.department || '')}
+                  list="part-receipt-ad-groups"
+                  placeholder="请输入或搜索AD域用户组"
                   style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
                 />
+                <datalist id="part-receipt-ad-groups">
+                  {adGroupOptions.map((name) => (
+                    <option key={name} value={name} />
+                  ))}
+                </datalist>
               </div>
               <div className="form-group">
                 <label>备注:</label>
@@ -1048,7 +1076,23 @@ const PartReceiptManagement = () => {
                       </div>
                       <div className="form-group">
                         <label>部门</label>
-                        <input type="text" name="department" value={partFormData.department} onChange={handlePartInputChange} />
+                        <input
+                          type="text"
+                          name="department"
+                          value={partFormData.department}
+                          onChange={(e) => {
+                            handlePartInputChange(e);
+                            searchAdGroups(e.target.value);
+                          }}
+                          onFocus={() => searchAdGroups(partFormData.department || '')}
+                          list="part-item-ad-groups"
+                          placeholder="请输入或搜索AD域用户组"
+                        />
+                        <datalist id="part-item-ad-groups">
+                          {adGroupOptions.map((name) => (
+                            <option key={name} value={name} />
+                          ))}
+                        </datalist>
                       </div>
                     </div>
                   </div>

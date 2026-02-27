@@ -3,9 +3,18 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.core.database import get_db
 from app.models.user import User as UserModel
+from app.models.ad_user_group import ADUserGroup as ADUserGroupModel
 from app.models.ad_config import ADConfig as ADConfigModel
 from app.schemas.user import User, UserCreate, UserUpdate, Token, UserLogin, ChangePassword
-from app.utils.security import get_password_hash, verify_password, create_access_token, get_current_user, require_admin
+from app.utils.security import (
+    get_password_hash,
+    verify_password,
+    create_access_token,
+    get_current_user,
+    require_admin,
+    require_permission,
+    get_role_permissions,
+)
 from app.utils.ad_auth import ADAuth
 from datetime import timedelta
 from app.core.config import settings
@@ -14,8 +23,55 @@ import logging
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["users"])
 
+
+def _build_unique_ad_email(db: Session, username: str, candidate_email: Optional[str], current_user_id: Optional[int] = None) -> str:
+    """
+    生成可用于 users.email(UNIQUE) 的邮箱值。
+    - 过滤空值/异常值（如 []）
+    - 若冲突，自动追加后缀
+    """
+    raw = (candidate_email or "").strip()
+    if raw in ("", "[]", "None", "null"):
+        raw = ""
+    base = raw or f"{username}@ad.local"
+
+    local, at, domain = base.partition("@")
+    if not at:
+        local = local or username
+        domain = "ad.local"
+    local = local or username
+    domain = domain or "ad.local"
+
+    email = f"{local}@{domain}"
+    idx = 1
+    while True:
+        exists = db.query(UserModel).filter(UserModel.email == email).first()
+        if not exists or (current_user_id is not None and exists.id == current_user_id):
+            return email
+        idx += 1
+        email = f"{local}.{idx}@{domain}"
+
+
+def _sync_local_user_groups(db: Session, user_id: int, groups: List[str]) -> int:
+    """覆盖式更新本地 AD 用户组快照"""
+    db.query(ADUserGroupModel).filter(ADUserGroupModel.user_id == user_id).delete()
+    count = 0
+    seen = set()
+    for name in groups or []:
+        group_name = (name or "").strip()
+        if not group_name or group_name in seen:
+            continue
+        seen.add(group_name)
+        db.add(ADUserGroupModel(user_id=user_id, group_name=group_name))
+        count += 1
+    return count
+
 @router.post("/register", response_model=User)
-def register_user(user: UserCreate, db: Session = Depends(get_db)):
+def register_user(
+    user: UserCreate,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(require_permission("user:write"))
+):
     # 检查用户是否已存在
     db_user = db.query(UserModel).filter(UserModel.username == user.username).first()
     if db_user:
@@ -26,11 +82,14 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
         if db_user:
             raise HTTPException(status_code=400, detail="邮箱已被注册")
     
-    # 创建新用户（与项目介绍一致，支持 email 为空）
+    # 兼容历史库：部分环境 users.email 为 NOT NULL，空邮箱时生成占位邮箱
+    email_value = (user.email or "").strip() or f"{user.username}@local.invalid"
+
+    # 创建新用户
     hashed_password = get_password_hash(user.password)
     db_user = UserModel(
         username=user.username,
-        email=user.email or None,
+        email=email_value,
         hashed_password=hashed_password,
         role=user.role or "user"
     )
@@ -78,10 +137,15 @@ def login_user(user: UserLogin, db: Session = Depends(get_db)):
                 db_user = db.query(UserModel).filter(UserModel.username == ad_user_info['username']).first()
                 
                 if not db_user:
+                    ad_email = _build_unique_ad_email(
+                        db,
+                        ad_user_info['username'],
+                        ad_user_info.get('email'),
+                    )
                     # 如果本地不存在，自动创建AD域用户记录
                     db_user = UserModel(
                         username=ad_user_info['username'],
-                        email=ad_user_info['email'],
+                        email=ad_email,
                         hashed_password="",  # AD域用户使用空字符串
                         role='user',  # 默认角色
                         is_ad_user=True,
@@ -95,7 +159,12 @@ def login_user(user: UserLogin, db: Session = Depends(get_db)):
                 else:
                     # 更新AD域用户信息
                     if db_user.is_ad_user:
-                        db_user.email = ad_user_info['email']
+                        db_user.email = _build_unique_ad_email(
+                            db,
+                            db_user.username,
+                            ad_user_info.get('email') or db_user.email,
+                            current_user_id=db_user.id,
+                        )
                         db_user.ad_dn = ad_user_info.get('dn')
                         db_user.display_name = ad_user_info.get('display_name')
                         db.commit()
@@ -130,29 +199,110 @@ def login_user(user: UserLogin, db: Session = Depends(get_db)):
                 headers={"WWW-Authenticate": "Bearer"},
             )
     
+    permissions = get_role_permissions(db, db_user.role)
+
     # 创建访问令牌
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": db_user.username, "role": db_user.role}, expires_delta=access_token_expires
+        data={"sub": db_user.username, "role": db_user.role, "permissions": permissions}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": db_user.username,
+        "role": db_user.role,
+        "permissions": permissions,
+    }
 
 @router.get("/list", response_model=List[User])
 def get_users(
+    query: Optional[str] = Query(None, description="搜索关键词（用户名、邮箱、显示名称）"),
+    is_ad_user: Optional[bool] = Query(None, description="是否仅返回AD用户"),
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_current_user)
+    current_user: UserModel = Depends(require_permission("user:read"))
 ):
     """获取用户列表（需要登录）"""
-    users = db.query(UserModel).offset(skip).limit(limit).all()
+    q = db.query(UserModel)
+    if is_ad_user is not None:
+        q = q.filter(UserModel.is_ad_user == is_ad_user)
+    if query:
+        search_filter = f"%{query}%"
+        q = q.filter(
+            (UserModel.username.like(search_filter)) |
+            (UserModel.email.like(search_filter)) |
+            (UserModel.display_name.like(search_filter))
+        )
+    users = q.offset(skip).limit(limit).all()
     return users
+
+
+@router.get("/count")
+def get_users_count(
+    query: Optional[str] = Query(None, description="搜索关键词（用户名、邮箱、显示名称）"),
+    is_ad_user: Optional[bool] = Query(None, description="是否仅统计AD用户"),
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(require_permission("user:read"))
+):
+    """获取用户总数（用于分页）"""
+    q = db.query(UserModel)
+    if is_ad_user is not None:
+        q = q.filter(UserModel.is_ad_user == is_ad_user)
+    if query:
+        search_filter = f"%{query}%"
+        q = q.filter(
+            (UserModel.username.like(search_filter)) |
+            (UserModel.email.like(search_filter)) |
+            (UserModel.display_name.like(search_filter))
+        )
+    return {"total": q.count()}
+
+
+@router.get("/ad-groups")
+def get_ad_groups(
+    query: Optional[str] = Query(None, description="组名搜索关键词"),
+    skip: int = 0,
+    limit: int = 1000,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(require_permission("user:read"))
+):
+    """从本地快照获取 AD 用户组聚合（组名 + 成员）"""
+    rows = db.query(ADUserGroupModel, UserModel).join(
+        UserModel, ADUserGroupModel.user_id == UserModel.id
+    ).filter(UserModel.is_ad_user == True).all()
+
+    group_map = {}
+    q = (query or "").strip().lower()
+    for rel, user in rows:
+        name = (rel.group_name or "").strip()
+        if not name:
+            continue
+        if q and q not in name.lower():
+            continue
+        if name not in group_map:
+            group_map[name] = []
+        group_map[name].append({
+            "id": user.id,
+            "username": user.username,
+            "display_name": user.display_name or "",
+        })
+
+    groups = [
+        {"name": name, "members": members, "count": len(members)}
+        for name, members in group_map.items()
+    ]
+    groups.sort(key=lambda x: (-x["count"], x["name"]))
+    return {
+        "total": len(groups),
+        "items": groups[skip: skip + limit],
+    }
 
 @router.get("/{user_id}", response_model=User)
 def get_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_current_user)
+    current_user: UserModel = Depends(require_permission("user:read"))
 ):
     """获取用户详情（需要登录）"""
     user = db.query(UserModel).filter(UserModel.id == user_id).first()
@@ -166,7 +316,7 @@ def search_users(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_current_user)
+    current_user: UserModel = Depends(require_permission("user:read"))
 ):
     """搜索用户（需要登录）"""
     search_filter = f"%{query}%"
@@ -181,7 +331,7 @@ def search_users(
 def get_user_groups(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_current_user)
+    current_user: UserModel = Depends(require_permission("user:read"))
 ):
     """获取AD域用户的组信息（需要登录）"""
     user = db.query(UserModel).filter(UserModel.id == user_id).first()
@@ -191,14 +341,17 @@ def get_user_groups(
     if not user.is_ad_user:
         raise HTTPException(status_code=400, detail="该用户不是AD域用户")
     
-    # 获取AD域配置
+    # 优先返回本地快照，避免每次实时打 AD
+    local_groups = db.query(ADUserGroupModel).filter(ADUserGroupModel.user_id == user.id).all()
+    if local_groups:
+        return sorted(list(set([(g.group_name or "").strip() for g in local_groups if (g.group_name or "").strip()])))
+
+    # 无本地快照时再回源 AD，并写入本地
     ad_config = db.query(ADConfigModel).filter(ADConfigModel.enabled == True).first()
     if not ad_config:
         raise HTTPException(status_code=400, detail="AD域未配置或未启用")
-    
+
     try:
-        from app.utils.ad_auth import ADAuth
-        
         ad_config_dict = {
             'enabled': ad_config.enabled,
             'server': ad_config.server,
@@ -213,10 +366,10 @@ def get_user_groups(
         }
         
         ad_auth = ADAuth(ad_config_dict)
-        # TODO: 实现获取用户组的方法
-        # groups = ad_auth.get_user_groups(user.username)
-        # return groups
-        return []  # 暂时返回空列表
+        groups = ad_auth.get_user_groups(user.username)
+        _sync_local_user_groups(db, user.id, groups)
+        db.commit()
+        return groups
     except Exception as e:
         logger.error(f"获取AD域用户组失败：{str(e)}")
         raise HTTPException(status_code=500, detail=f"获取用户组失败：{str(e)}")
@@ -225,7 +378,7 @@ def get_user_groups(
 def sync_ad_user(
     username: str,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(require_admin)
+    current_user: UserModel = Depends(require_permission("user:write"))
 ):
     """同步单个AD域用户（需要管理员权限）"""
     # 获取AD域配置
@@ -234,8 +387,6 @@ def sync_ad_user(
         raise HTTPException(status_code=400, detail="AD域未配置或未启用")
     
     try:
-        from app.utils.ad_auth import ADAuth
-        
         ad_config_dict = {
             'enabled': ad_config.enabled,
             'server': ad_config.server,
@@ -250,10 +401,42 @@ def sync_ad_user(
         }
         
         ad_auth = ADAuth(ad_config_dict)
-        # 使用服务账号查询用户信息（需要实现）
-        # user_info = ad_auth.get_user_info_by_username(username)
-        # 创建或更新用户记录
-        return {"message": "同步功能待实现"}
+        user_info = ad_auth.get_user_info_by_username(username)
+        if not user_info:
+            raise HTTPException(status_code=404, detail=ad_auth.last_error or "未找到AD用户")
+
+        ad_username = (user_info.get("username") or username).strip()
+        db_user = db.query(UserModel).filter(UserModel.username == ad_username).first()
+        ad_email = _build_unique_ad_email(db, ad_username, user_info.get("email"))
+        if not db_user:
+            db_user = UserModel(
+                username=ad_username,
+                email=ad_email,
+                hashed_password="",
+                role="user",
+                is_ad_user=True,
+                ad_dn=user_info.get("dn"),
+                display_name=user_info.get("display_name") or ad_username,
+            )
+            db.add(db_user)
+            action = "created"
+        else:
+            db_user.is_ad_user = True
+            db_user.email = _build_unique_ad_email(
+                db,
+                db_user.username,
+                user_info.get("email") or db_user.email,
+                current_user_id=db_user.id,
+            )
+            db_user.ad_dn = user_info.get("dn")
+            db_user.display_name = user_info.get("display_name") or db_user.display_name
+            action = "updated"
+        groups = user_info.get("groups") or ad_auth.get_user_groups(ad_username)
+        group_count = _sync_local_user_groups(db, db_user.id, groups)
+        db.commit()
+        return {"message": "同步成功", "action": action, "username": ad_username, "groups": group_count}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"同步AD域用户失败：{str(e)}")
         raise HTTPException(status_code=500, detail=f"同步失败：{str(e)}")
@@ -261,17 +444,28 @@ def sync_ad_user(
 @router.post("/sync-all-ad-users")
 def sync_all_ad_users(
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(require_admin)
+    current_user: UserModel = Depends(require_permission("user:write"))
 ):
     """批量同步所有AD域用户（需要管理员权限）"""
     # 触发同步任务
     from app.utils.ad_sync_scheduler import sync_all_ad_users_job
     try:
-        sync_all_ad_users_job()
-        return {"message": "AD域用户同步任务已触发"}
+        result = sync_all_ad_users_job()
+        if result.get("error"):
+            raise HTTPException(status_code=500, detail=f"同步失败：{result['error']}")
+        return {
+            "message": "AD域用户同步完成",
+            "total": result.get("total", 0),
+            "created": result.get("created", 0),
+            "updated": result.get("updated", 0),
+            "groups": result.get("groups", 0),
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"触发AD域用户同步失败：{str(e)}")
-        raise HTTPException(status_code=500, detail=f"同步失败：{str(e)}")
+        err_msg = str(e) or repr(e) or "未知错误"
+        logger.error(f"触发AD域用户同步失败：{err_msg}")
+        raise HTTPException(status_code=500, detail=f"同步失败：{err_msg}")
 
 @router.put("/{user_id}", response_model=User)
 def update_user(
@@ -301,6 +495,13 @@ def update_user(
     
     # 更新用户信息
     update_data = user_update.dict(exclude_unset=True)
+
+    # 非具备角色管理权限的用户不能修改角色（防止越权提权）
+    if "role" in update_data and current_user.role != "admin" and not ("role:write" in get_role_permissions(db, current_user.role)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅管理员可修改用户角色"
+        )
     
     # 如果更新密码
     if "password" in update_data and update_data["password"]:
@@ -370,7 +571,7 @@ def change_password(
 def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(require_admin)
+    current_user: UserModel = Depends(require_permission("user:delete"))
 ):
     """删除用户（需要管理员权限）"""
     db_user = db.query(UserModel).filter(UserModel.id == user_id).first()

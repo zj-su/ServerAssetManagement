@@ -1,6 +1,7 @@
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List, Callable
+import json
 from jose import jwt, JWTError
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -8,12 +9,18 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.user import User as UserModel
+from app.models.role import Role as RoleModel
 
 # 密码加密上下文
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # HTTP Bearer认证（auto_error=False 使缺少 header 时返回 None，由 get_current_user 统一返回 401）
 security = HTTPBearer(auto_error=False)
+
+DEFAULT_ROLE_PERMISSIONS = {
+    "admin": ["*"],
+    "user": ["server:read", "part:read", "receipt:read", "scrap:read"],
+}
 
 # JWT相关函数
 def verify_password(plain_password, hashed_password):
@@ -140,3 +147,39 @@ def require_admin(
             detail="需要管理员权限"
         )
     return current_user
+
+
+def get_role_permissions(db: Session, role_name: str) -> List[str]:
+    if not role_name:
+        return []
+    role = db.query(RoleModel).filter(RoleModel.name == role_name).first()
+    if role:
+        try:
+            vals = json.loads(role.permissions or "[]")
+            if isinstance(vals, list):
+                return vals
+        except Exception:
+            pass
+    return DEFAULT_ROLE_PERMISSIONS.get(role_name, [])
+
+
+def has_permission(db: Session, user: UserModel, permission: str) -> bool:
+    if not user:
+        return False
+    permissions = get_role_permissions(db, user.role)
+    return "*" in permissions or permission in permissions
+
+
+def require_permission(permission: str) -> Callable:
+    def _checker(
+        current_user: UserModel = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> UserModel:
+        if has_permission(db, current_user, permission):
+            return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"缺少权限: {permission}",
+        )
+
+    return _checker

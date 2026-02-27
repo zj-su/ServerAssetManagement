@@ -47,6 +47,9 @@ class User(UserInDBBase):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    username: Optional[str] = None
+    role: Optional[str] = None
+    permissions: Optional[list] = None
 
 # Token数据模型
 class TokenData(BaseModel):
